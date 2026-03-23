@@ -1082,31 +1082,6 @@ Average the pixel intensities in every HexBin
 hexbin_df_all <- HexBin_Signal(data = bin_sp,
                                pixel_info = pixel_info)
 write.csv(hexbin_df_all, paste0(dataset_path, "hexbin_df_all.csv"))
-# hexbin_list <- list()
-# 
-# for (scan in unique(pixel_info$run)) {
-#   
-#    for (hexbin in unique(pixel_info$bin)) {
-#     idx_run <- pixel_info$run == scan
-#     idx_hexbin <- pixel_info$bin == hexbin
-#     
-#     hexbin_idx <- '&'(idx_run, idx_hexbin)
-#     
-#     hexbin_df <- bin_sp_on_tissue[, hexbin_idx, drop = F]
-#     
-#     if (ncol(hexbin_df) == 0) next
-#     mean_vec <- rowMeans(hexbin_df)
-#     
-#     temp <- data.frame(mean_intensity = mean_vec, row.names = names(mean_vec))
-#     colnames(temp) <- paste(scan, hexbin, sep = "@")
-#     hexbin_list[[paste(scan, hexbin, sep = "@")]] <- temp
-#   }
-#   
-#   
-# }
-# 
-# hexbin_df_all <- do.call(cbind, hexbin_list)
-
 ```
 
 
@@ -1133,51 +1108,10 @@ intensity_range <- hexbin_info %>%
             max_val = max(intensity, na.rm = TRUE))
  
 write.csv(hexbin_info %>% dplyr::select(-intensity, -mz), paste0(dataset_path, "hexbin_info.csv"), row.names = F)
-
-# 
-# hexbin_info <- read.csv(paste0(dataset_path, "hexbin_info.csv"))
-
-# outline<- standardize_coordinates(lens_m)
-# outline<- as.data.frame(outline$X)
-# colnames(outline) <- c("y", "x")
-# outline <- outline %>%
-#   relocate(x, .before = y)
-# outline$group <- 1
-ggplot(hexbin_info %>% 
-         filter(run %in% c("hbnc_a_trim", "hboc_c_trim")),
-       aes(x,y))+
-  geom_raster(aes(fill = intensity))+
-  facet_wrap(vars(run))+
-  coord_equal()+
-  scale_fill_viridis(
-    option = "D"
-  ) +
-  theme_article()+
-  theme(
-    axis.title = element_blank(),
-    axis.text  = element_blank(),
-    axis.ticks = element_blank()
-  )
+```
 
 
-ggplot(hexbin_info %>% 
-         filter(run %in% c("hbnc_a_trim", "hboc_c_trim")),
-       aes(z.final,r.final))+
-  geom_voronoi(aes(fill = intensity), outline = outline)+
-  facet_wrap(vars(run))+
-  coord_equal()+
-  scale_fill_viridis(
-    option = "D"
-  ) +
-  theme_article()+
-  theme(
-    axis.title = element_blank(),
-    axis.text  = element_blank(),
-    axis.ticks = element_blank()
-  )
-
-
-
+```{r, eval=FALSE, include=TRUE}
 png(paste0(fig_path, "GSH_ex.png"), width = 2000, height = 1300, res = 350)
 ggplot(hexbin_info %>% filter(run %in% c("hbnc_a_trim", "hboc_c_trim"))) +
   geom_voronoi(aes(z.final, r.final, fill = intensity), outline = outline) +
@@ -1197,30 +1131,6 @@ ggplot(hexbin_info %>% filter(run %in% c("hbnc_a_trim", "hboc_c_trim"))) +
   )
   
 dev.off()
-
-# png(paste0(fig_path, "GSH_raw.png"), width = 2000, height = 1300, res = 350)
-# ggplot(hexbin_info %>% filter(treatment %in% c("hbnc", "hboc"))) +
-#   geom_raster(aes(x, y, fill = intensity), interpolate = TRUE) +
-#   coord_equal() +
-#   facet_wrap(vars(run)) +
-#   scale_fill_viridis(option = "D") +
-#   theme_article() +
-#   theme(
-#     axis.title = element_blank(),
-#     axis.text  = element_blank(),
-#     axis.ticks = element_blank(),
-#     panel.background = element_rect(fill = "black", colour = NA),
-#     plot.background  = element_rect(fill = "black", colour = NA),
-#     strip.background = element_rect(fill = "grey20", colour = NA),
-#     strip.text       = element_text(color = "white"),
-#     legend.background = element_rect(fill = "black", colour = NA),
-#     legend.text = element_text(color = "white"),
-#     legend.title = element_text(color = "white")
-#   )
-# 
-#   
-# dev.off()
-
 ```
 
 Average the molecular intensity across HexBins
