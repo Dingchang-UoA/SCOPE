@@ -44,8 +44,8 @@ invisible(lapply(function_files, source))
 Set up working directory
 ```{r}
 wd <- getwd()
-dataset_path <- file.path(wd, "data")
-fig_path <- file.path(wd, "figures")
+dataset_path <- file.path(wd, "data/")
+fig_path <- file.path(wd, "figures/")
 ```
 
 # 2. Data pre-processing 
