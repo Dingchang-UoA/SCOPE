@@ -924,7 +924,7 @@ dev.off()
 ### 3.2.1 Co-registration
 Lens shape model
 ```{r, message=FALSE, warning=FALSE}
-lens_m <- read.csv(paste0(dataset_path, "Model_lens.csv"))
+lens_m <- read.csv(paste0(dataset_path, "/Model_lens.csv"))
 outline <- data.frame(z.final = lens_m$z,
                       r.final = lens_m$r)
 outline<- standardize_coordinates(lens_m)
@@ -943,7 +943,7 @@ fig_model <- ggplot(lens_m, aes(z,r))+
 ```
 
 ```{r, message=FALSE, warning=FALSE}
-# bin_info <- as.data.frame(str_split_fixed(colnames(bin_sp_on_tissue), "@", 4))
+bin_info <- read.csv(paste0(dataset_path, "/bin_info.csv"))
 coordata <- bin_info[,c("x", "y", "run", "on_tissue")]
 coordata <- find_edge_m(coordata)
 
