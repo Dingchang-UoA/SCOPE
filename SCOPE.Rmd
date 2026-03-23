@@ -1,0 +1,4106 @@
+---
+title: "SCOPE: A Spatial Co-registration and Omics Pipeline for Comparative MSI Analysis"
+author: "Dingchang Shi, George Guo, Angus Grey"
+date: "2025-10-07"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(eval = FALSE)
+```
+
+# 1. Load package
+Load the necessary packages used in this workflow and the functions
+```{r, message = FALSE, warning= FALSE}
+library(tibble)
+library(BiocParallel)
+library(data.table)
+library(HiTMaP) 
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(LOMAR)
+library(viridisLite)
+library(ggpubr)
+library(ggrepel)
+library(ggvoronoi)
+library(viridis)
+library(Cardinal)
+library(egg)
+library(hexbin)
+library(readr)
+library(gghalves)
+library(ggrepel)
+library(ComplexHeatmap)
+library(purrr)
+library(RColorBrewer)
+function_files <- list.files(path = "/functions/", 
+                             pattern = "\\.R$", 
+                             full.names = TRUE)
+
+invisible(lapply(function_files, source))
+```
+
+Set up working directory
+```{r}
+wd <- getwd()
+dataset_path <- file.path(wd, "data")
+fig_path <- file.path(wd, "figures")
+```
+
+# 2. Data pre-processing 
+
+Skip if the pre-processing has already been completed.
+
+## 2.1 Peak alignment  
+```{r, eval=FALSE, include=T}
+datafile <- c("hbnc_a_trim", "hbnc_b_trim", "hbnc_c_trim",
+              "hbnn_a_trim", "hbnn_b_trim", "hbnn_c_trim",
+              "hbnd_a_trim", "hbnd_b_trim", "hbnd_c_trim",
+              "hboc_a_trim", "hboc_b_trim", "hboc_c_trim",
+              "hbon_a_trim", "hbon_b_trim", "hbon_c_trim",
+              "hbod_a_trim", "hbod_b_trim", "hbod_c_trim"
+              )
+datafiles <- file.path(dataset_path, datafile)
+
+# Set up the mass tolerance for pre-processing 
+ppm <- 30 
+
+# Rotate the sections to make sure all the tissue sections have the same orientation
+rotate = c(180, 0, 0,  
+           180, 0, 0,
+           180, 180, 180,
+           180, 180, 0,
+           180, 180, 0,
+           180, 180, 180)
+
+# Load the peak table and remove peaks that fall below the threshold.
+deconv_peaklist <- read.csv(paste0(dataset_path, "/peak_list.csv"))
+deconv_peaklist <- deconv_peaklist %>% filter(Intensity >= 5)
+
+combined_imdata_path <- MSI_preprocessing(datafile = datafiles, 
+                                          workdir = dataset_path,
+                                          deconv_peaklist = deconv_peaklist,
+                                          rotate = rotate,
+                                          ppm = ppm)
+```
+
+After pre-processing, all imzML files are combined and saved into one object named as "combinedimdata.rds". Load the file for further analysis and visualization. 
+```{r, eval=FALSE, include=T}
+combinedimdata <- readRDS(paste0(dataset_path,"/combinedimdata.rds"))
+```
+
+```{r, eval=FALSE, message=FALSE, warning=FALSE}
+combinedimdata <- readRDS(paste0(dataset_path,"/combinedimdata.rds"))
+#png(paste0(fig_path, "GSH_CySSG_Cysteinyl_glutamine_ion_images.png"), width = 3000, height = 5800, res = 600)
+image(combinedimdata, 
+      run = c("hbnc_a_trim", "hboc_c_trim"), 
+      mz = c(306.0773, 425.0815, 120.0127), 
+      enhance = "hist", 
+      smooth = "gaussian", 
+      layout = c(3,2), 
+      grid = F,
+      # labels = c("HBN", "HBN",  "HBN",  "HBO",  "HBO",  "HBO"), 
+      # style = "dark",
+      # scale = T,
+      xlab = "",
+      ylab = "",
+      xaxt = "n",
+      yaxt = "n")
+
+x.start <- 75
+y.start <- 224
+bar.length <- 100
+lines(c(x.start, x.start + bar.length), c(y.start, y.start),
+      col = "black", lwd = 2)
+text(x.start + bar.length / 2, y.start + 12,
+     "7.5 mm", col = "black", cex = 1.2 )
+#dev.off()
+```
+
+```{r, eval = F,include=FALSE}
+png(paste0(fig_path, "extended_ion_images.png"), width = 6000, height = 5800, res = 600)
+image(combinedimdata, 
+      run = c("hbnc_a_trim", "hboc_c_trim"), 
+      mz = mz_names[!mz_names %in% c(306.0773, 425.0815, 120.0127)], 
+      enhance = "hist", 
+      smooth = "gaussian", 
+      layout = c(3,6), 
+      grid = F,
+      xlab = "",
+      ylab = "",
+      xaxt = "n",
+      yaxt = "n")
+x.start <- 75
+y.start <- 224
+bar.length <- 100
+lines(c(x.start, x.start + bar.length), c(y.start, y.start),
+      col = "black", lwd = 2)
+text(x.start + bar.length / 2, y.start + 12,
+     "7.5 mm", col = "black", cex = 1.2 )
+dev.off()
+```
+
+
+## 2.2 Arbitrary Segmentation
+
+This is an example of one run from "HBN control" group. 
+```{r, eval=FALSE, include=T}
+imdata <- combinedimdata[, which(run(combinedimdata) == "hbnc_a_trim" )]
+coordata <- retrieve_coord(imdata)
+
+#Downsample the raw data from 75 µm to 150 µm resolution to improve computational efficiency
+coordata$x_conv <-  ((coordata$x-min(coordata$x)) %/% 2) * 2 + min(coordata$x)
+coordata$y_conv <-  ((coordata$y-min(coordata$y)) %/% 2) * 2 + min(coordata$y)
+
+df <- unique(data.frame(x = coordata$x_conv,
+                 y = coordata$y_conv,
+                 run = coordata$run))
+
+# Load segmentation definition
+Virtual_segmentation_rankfile <- paste0(dataset_path, "radius_rank_bovin.csv")
+
+# Apply arbitrary segmentation 
+df <- virtual_segmentation(df, Virtual_segmentation_rankfile)
+colnames(df)[1:2] <- c("x_conv" , "y_conv")
+df$pattern <- factor(df$pattern, levels = c("OC", "IC", "Core"))
+
+ggplot(df, aes(x_conv, -y_conv, fill = pattern)) +
+            coord_equal()+ylab("y_conv")+
+            geom_raster() + labs(fill = "Region") +
+            scale_fill_manual(values = c("OC" = "#1b75be", 
+                                        "IC" = "#89bff8", 
+                                        "Core" = "#e3f1ff")) +
+            theme_void()+
+            theme(legend.title = element_blank(),
+                  axis.title = element_blank(),
+                  axis.text = element_blank(),
+                  axis.ticks = element_blank(),
+                  legend.position = "right")
+```
+
+## 2.3 Spectrum calculation
+
+Regional mean spectra from arbitrary segmentation were derived from raw data, with off-tissue areas removed prior to calculation.
+```{r, eval=FALSE, include=T}
+#Using UMAP to remove the off-tissue areas
+sp <- as.data.frame(as.matrix(spectra(imdata, "intensity")))
+rownames(sp) <- mz(imdata)
+sp_mt <- t(sp)
+set.seed(2025)
+umap.raw  <-uwot::umap(sp_mt,
+                      n_neighbors = 40,
+                      metric = "correlation",
+                      spread = 1,
+                      min_dist = 0.01,
+                      n_threads = 47,
+                      verbose = TRUE)
+
+
+umap.res <- as.data.frame(umap.raw)
+colnames(umap.res) <- c("UMAP_1", "UMAP_2")
+
+set.seed(2025)
+kmeans.res <- kmeans(umap.res[,c("UMAP_1", "UMAP_2")], centers = 5, nstart = 10)
+umap.res$cluster <- as.factor(kmeans.res$cluster)
+
+umap.res <- cbind(umap.res, coordata)
+
+p1 <- ggplot(umap.res, aes(UMAP_1, UMAP_2, color = cluster))+
+  geom_point()+
+  theme_article()+
+  theme(axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      legend.position = c(0.9, 0.2))+
+  scale_color_manual(values = RColorBrewer::brewer.pal(5, "Spectral"))
+
+p2 <- ggplot(umap.res, aes(x,y, fill = cluster))+
+  geom_raster()+
+  theme_article()+ xlim(0, 160)+
+  coord_equal()+
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(0.88, 0.2),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()
+    )+
+  scale_fill_manual(values = RColorBrewer::brewer.pal(5, "Spectral"))
+
+p3 <- ggplot(umap.res %>% filter(cluster %in% c(1,5)), aes(x,y, fill = cluster))+
+  geom_raster(fill = "black")+
+  theme_article()+ 
+  coord_equal()+
+  theme(
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    axis.title = element_blank()
+    )
+
+library(patchwork)
+png(paste0(fig_path, "hbnc_a.png"), width = 4200, height = 1500, res = 400)
+p1 + p2+ p3 + plot_layout(widths = c(1.2, 1.05, 0.8))
+dev.off()
+```
+
+```{r, message=FALSE, warning=FALSE}
+umap.res$label <- ifelse(umap.res$cluster %in% c(1, 5),
+                         "off tissue",
+                         "on tissue")
+
+
+
+lt_cluster_mean <- list()
+
+for (cluster in unique(umap.res$label)){
+  sp_cluster <- sp[,umap.res$label == cluster]
+  df_cluster_mean <- data.frame(mz = rownames(sp_cluster),
+                                mean_spec = rowMeans(sp_cluster, na.rm = T),
+                                cluster = cluster)
+  rownames(df_cluster_mean) <- NULL
+  lt_cluster_mean[[as.character(cluster)]] <- df_cluster_mean
+}
+
+df_cluster_mean_all <- do.call(rbind, lt_cluster_mean)
+df_cluster_mean_all$mz <- as.numeric(df_cluster_mean_all$mz)
+df_cluster_mean_all$mean_spec <- as.numeric(df_cluster_mean_all$mean_spec)
+
+
+ggplot(df_cluster_mean_all, aes(x = mz, y = mean_spec, color = cluster)) +
+  geom_line() + 
+  xlim(100, 800)+
+  theme_article()+
+  facet_grid(row = vars(cluster))+
+  scale_color_manual(values = RColorBrewer::brewer.pal(5, "Spectral") )
+
+
+lt_cluster_mean <- list()
+
+for (cluster in unique(umap.res$cluster)){
+  sp_cluster <- sp[,umap.res$cluster == cluster]
+  df_cluster_mean <- data.frame(mz = rownames(sp_cluster),
+                                mean_spec = rowMeans(sp_cluster, na.rm = T),
+                                cluster = cluster)
+  rownames(df_cluster_mean) <- NULL
+  lt_cluster_mean[[as.character(cluster)]] <- df_cluster_mean
+}
+
+df_cluster_mean_all <- do.call(rbind, lt_cluster_mean)
+df_cluster_mean_all$mz <- as.numeric(df_cluster_mean_all$mz)
+df_cluster_mean_all$mean_spec <- as.numeric(df_cluster_mean_all$mean_spec)
+
+
+ggplot(df_cluster_mean_all, aes(x = mz, y = mean_spec, color = cluster)) +
+  geom_line() + 
+  xlim(100, 800)+
+  theme_article()+
+  facet_grid(row = vars(cluster))+
+  scale_color_manual(values = RColorBrewer::brewer.pal(5, "Spectral") )
+```
+
+```{r, eval=FALSE, include=T}
+# The data will be transformed into a matrix format, with each row corresponding to an m/z value and each column representing a region or pixel. The matrix entries indicate the averaged intensity in that region or the convoluted pixel (150 µm). The "pixel_convolution()" function is used to calculate the regional mean spectra, during which tissue cracks are excluded to avoid bias in the regional averages. However, when computing spectra for convoluted pixels, the cracks are retained to ensure the convolution more accurately reflects the raw data. In this case, off-tissue areas must be removed to prevent background signals from affecting the results.
+
+hbnc_a_region <- pixel_convolution(umap.res,
+                                sp,
+                                off_tissue_cluster = c(1,5),
+                                convolution_level = "region")
+
+
+hbnc_a_bin <- pixel_convolution(umap.res,
+                                sp,
+                                off_tissue_cluster = c(1,5),
+                                convolution_level = "square_bin")
+```
+
+Once all runs are finished, the resulting data matrices will be saved as .Rdata files.
+```{r}
+load(paste0(dataset_path, "hbo_region.RData"))
+load(paste0(dataset_path, "hbn_region.RData"))
+```
+
+Arbitrary segmentation data
+```{r, eval= FALSE, include=TRUE}
+hbn_region_df <- do.call(cbind, hbn_region)
+hbo_region_df <- do.call(cbind, hbo_region)
+
+hbn_info <- as.data.frame(str_split_fixed(colnames(hbn_region_df), "@" , 2))
+colnames(hbn_info) <- c("run", "region")
+hbo_info <- as.data.frame(str_split_fixed(colnames(hbo_region_df), "@" , 2))
+colnames(hbo_info) <- c("run", "region")
+
+# Combine the data matrices 
+mean_sp_df <- cbind(hbn_region_df , hbo_region_df)
+# info <- rbind(hbn_info, hbo_info)
+
+write.csv(mean_sp_df, paste0(dataset_path, "mean_sp_df.csv"), row.names = T)
+```
+
+Remove the off-tissue areas from convoluted pixel (150 µm) data.
+```{r, eval= FALSE, include= TRUE}
+hbn_bin<- do.call(cbind, hbn_bin)
+hbo_bin<- do.call(cbind, hbo_bin)
+```
+
+```{r, eval= FALSE, include= TRUE}
+bin_sp <- cbind(hbn_bin, hbo_bin)
+bin_sp <- bin_sp %>% select(matches("hbnc|hboc|hbnn|hbon"))
+bin_sp[is.na(bin_sp)] <- 0
+bin_sp_filter <- bin_sp[order(rowSums(bin_sp, na.rm = T), decreasing = TRUE)[1:100],]
+bin_sp_mt <- t(bin_sp_filter)
+bin_sp_mt[is.na(bin_sp_mt)]<-0
+
+set.seed(1)
+umap.res <- uwot::umap(bin_sp_mt, 
+                       n_neighbors = 100,
+                       min_dist = 0.1)
+
+umap.res <- as.data.frame(umap.res)
+colnames(umap.res) <- c("UMAP_1", "UMAP_2")
+
+ggplot(umap.res, aes(UMAP_1, UMAP_2))+
+  geom_point()+
+  theme_article()
+
+umap_flt <- umap.res %>% filter(UMAP_1 < -5)
+info <- as.data.frame(str_split_fixed(rownames(umap_flt), "@" , 4))
+
+colnames(info) <- c("run", "x", "y", "region")
+info$x <- as.numeric(info$x)
+info$y <- as.numeric(info$y)
+info <- cbind(info, umap_flt)
+
+# library(magrittr)
+# 
+# info$new_names <- info$run %>%
+#   gsub("_a_trim", " Rep1", ., ignore.case = TRUE) %>%
+#   gsub("_b_trim", " Rep2", ., ignore.case = TRUE) %>%
+#   gsub("_c_trim", " Rep3", ., ignore.case = TRUE) %>%
+#   gsub("^hbnc", "HBNc", ., ignore.case = TRUE) %>%
+#   gsub("^hbnn", "HBNn", ., ignore.case = TRUE) %>%
+#   gsub("^hboc", "HBOc", ., ignore.case = TRUE) %>%
+#   gsub("^hbon", "HBOn", ., ignore.case = TRUE)
+
+
+
+png(paste0(fig_path, "off_tissue_new.png"), width = 4000, height = 2200, res = 550)
+ggplot(info, aes(x,y))+
+  geom_raster(fill = "black") + 
+  facet_wrap(vars(new_names), ncol = 6) + 
+  coord_equal()+
+  theme_article()+
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+dev.off()
+# write.csv(bin_sp, paste0(dataset_path, "raw_data_convoluted.csv"))
+```
+
+```{r, eval=FALSE, include=FALSE}
+umap.res <- umap.res %>%
+  mutate(label = if_else(UMAP_1 < -5, "off tissue", "on tissue"))
+
+lt_cluster_mean <- list()
+
+for (cluster in unique(umap.res$label)){
+  sp_cluster <- bin_sp[,umap.res$label == cluster]
+  df_cluster_mean <- data.frame(mz = rownames(sp_cluster),
+                                mean_spec = rowMeans(sp_cluster, na.rm = T),
+                                cluster = cluster)
+  rownames(df_cluster_mean) <- NULL
+  lt_cluster_mean[[as.character(cluster)]] <- df_cluster_mean
+}
+
+df_cluster_mean_all <- do.call(rbind, lt_cluster_mean)
+df_cluster_mean_all$mz <- as.numeric(df_cluster_mean_all$mz)
+df_cluster_mean_all$mean_spec <- as.numeric(df_cluster_mean_all$mean_spec)
+
+png(paste0(fig_path, "off_on_tissues_sp_comparison.png"), width = 2000, height = 1200, res = 350)
+ggplot(df_cluster_mean_all,
+       aes(x = mz, y = (mean_spec), color = cluster)) +
+  geom_line() + 
+  # xlim(100, 800)+
+  theme_article()+
+  facet_grid(row = vars(cluster), scales = "free_y")+
+  scale_color_manual(values = RColorBrewer::brewer.pal(5, "Spectral") )+ 
+  ylab("Intensity")+
+  theme(legend.position = "none")
+dev.off()
+```
+
+
+Convoluted pixel (150 µm) data
+```{r, eval=FALSE, include=T}
+bin_info <- as.data.frame(str_split_fixed(colnames(bin_sp), "@", 4))
+colnames(bin_info) <- c("run", "x", "y" , "region")
+bin_info$x <- as.numeric(bin_info$x)
+bin_info$y <- as.numeric(bin_info$y)
+bin_info$on_tissue <- umap.res$UMAP_1 > -5
+write.csv(bin_info, paste0(dataset_path, "bin_info.csv"), row.names = F)
+
+bin_sp_on_tissue <- bin_sp[, which(umap.res$UMAP_1 > -5)]
+write.csv(bin_sp_on_tissue, paste0(dataset_path, "bin_sp_on_tissue.csv"))
+```
+
+## 2.3 Arbitrary Segmentation
+```{r, eval=FALSE, include=T}
+umap.res <- umap.res %>%
+  mutate(.rowid = row_number()) %>%  
+  left_join(df[, c("x_conv", "y_conv", "run", "pattern")], 
+            by = c("x_conv", "y_conv", "run")) %>%
+  arrange(.rowid) %>%
+  select(-.rowid)
+
+
+p_raw <- ggplot(umap.res, aes(x, -y, fill = pattern)) +
+            geom_raster() +
+            coord_equal()+
+            scale_fill_manual(values = c("OC" = "#FF8FAB",
+                               "IC" = "#FFB3C6",
+                               "Core" = "#FFE5EC")) +
+            labs(fill = "Region") +
+            egg::theme_article()+ ylab("y")+
+            theme(
+                  axis.text = element_blank(),
+                  axis.ticks = element_blank())
+  
+p_conv <- ggplot(umap.res, aes(x_conv, -y_conv, fill = pattern)) +
+            coord_equal()+ylab("y_conv")+
+            geom_raster() + labs(fill = "Region") +
+            scale_fill_manual(values = c("OC" = "#FF8FAB",
+                               "IC" = "#FFB3C6",
+                               "Core" = "#FFE5EC")) +
+            egg::theme_article()+
+            theme(
+                  axis.text = element_blank(),
+                  axis.ticks = element_blank())
+
+p_off_tissue_remove1 <- ggplot(umap.res %>% filter(!cluster %in% c(1,5)),
+                              aes(x_conv, -y_conv, fill = pattern)) +
+            coord_equal()+ylab("y_conv")+
+            geom_raster() + labs(fill = "Region") +
+            scale_fill_manual(values = c("OC" = "#FF8FAB",
+                               "IC" = "#FFB3C6",
+                               "Core" = "#FFE5EC")) +
+            egg::theme_article() +
+            theme(
+                  axis.text = element_blank(),
+                  axis.ticks = element_blank())
+
+p_off_tissue_remove2 <- ggplot(umap.res %>% filter(!cluster %in% c(1,5)),
+                              aes(x, -y, fill = pattern)) +
+            coord_equal()+ ylab("y")+
+            geom_raster() + labs(fill = "Region") +
+            scale_fill_manual(values = c("OC" = "#FF8FAB",
+                               "IC" = "#FFB3C6",
+                               "Core" = "#FFE5EC")) +
+            egg::theme_article()+
+            theme(
+                  axis.text = element_blank(),
+                  axis.ticks = element_blank())
+
+p_combined <- (
+  (p_raw + p_conv) /
+  (p_off_tissue_remove2 + p_off_tissue_remove1)
+) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "top")
+
+png(paste0(fig_path, "hbnc_a_conv.png"), width = 3000, height = 4500, res = 500)
+p_combined
+dev.off()
+
+# png(paste0(fig_path, "hbnc_arb_seg.png"), width = 1500, height = 1800, res = 600)
+ggplot(umap.res, aes(x_conv, -y_conv, fill = pattern)) +
+            coord_equal()+ylab("y_conv")+
+            geom_raster() + labs(fill = "Region") +
+            scale_fill_manual(values = c("OC" = "#1b75be", 
+                                        "IC" = "#89bff8", 
+                                        "Core" = "#e3f1ff")) +
+            theme_void()+
+            theme(legend.title = element_blank(),
+                  axis.title = element_blank(),
+                  axis.text = element_blank(),
+                  axis.ticks = element_blank(),
+                  legend.position = "right")
+# dev.off()
+```
+
+
+
+# 3. Data analysis 
+
+```{r, message=FALSE, warning=FALSE}
+mean_sp_df <- load_csv(paste0(dataset_path, "mean_sp_df.csv"))
+bin_sp_on_tissue <- load_csv(paste0(dataset_path, "bin_sp_on_tissue.csv"))
+```
+
+Target GSH-related metabolites
+```{r, message=FALSE, warning=FALSE}
+mz_names <- c("OPH" = 288.1209,
+              "GSH" = 306.0773, 
+              "SDGSH" = 422.0885,
+              "Glutamic acid" = 146.0466,
+              "CySSG" = 425.0815,
+              "GSSG" = 611.1461,
+              "Oxoproline" = 128.0360,
+              "Cysteinyl glycine" = 177.0367,
+              "GGC" = 249.0582,
+              "GSSH" = 338.0491,
+              "SHGSH" = 336.0854,
+              "Cysteine" = 120.0127)                     
+```
+
+
+## 3.1 Layer 1 and 2: Bulk analysis and Arbitrary segmentation analysis
+
+### 3.1.1 Bulk anslysis and segmentation analysis
+```{r, message=FALSE, warning=FALSE}
+# Imputation
+region_df <- log10(mean_sp_df+1)
+
+df_long <- region_df %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer(-mz, names_to = "sample", values_to = "intensity") %>%
+  mutate(replicate = sub("@.*", "", sample)) 
+df_avg <- df_long %>%
+  group_by(mz, replicate) %>%
+  summarise(mean_intensity = mean(intensity, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = replicate, values_from = mean_intensity) %>%
+  tibble::column_to_rownames("mz")
+
+hbnc_cols <- c("hbnc_a_trim", "hbnc_b_trim", "hbnc_c_trim")
+hboc_cols <- c("hboc_a_trim", "hboc_b_trim", "hboc_c_trim")
+
+
+df_avg_select <- df_avg %>%
+  dplyr::select(all_of(c(hbnc_cols, hboc_cols)))
+
+df_avg_select$mz <- rownames(df_avg_select)
+df_long <- df_avg_select %>%
+  pivot_longer(cols = all_of(c(hbnc_cols, hboc_cols)),
+               names_to = "replicate",
+               values_to = "intensity") %>%
+  mutate(
+    group = case_when(
+      str_detect(replicate, "hbnc") ~ "hbnc",
+      str_detect(replicate, "hboc") ~ "hboc"
+    )
+  ) %>% filter(mz %in% mz_names)
+
+df_long$name <- names(mz_names)[match(df_long$mz, mz_names)]
+df_long$Region <- "Whole lens"
+```
+
+```{r, message=FALSE, warning=FALSE}
+df_long_r <- region_df %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer(-mz, names_to = "sample", values_to = "intensity") %>%
+  filter(mz %in% mz_names) %>% 
+  separate(sample, into = c("id_part", "Region"), sep = "@", remove = FALSE) %>%
+  separate(id_part, into = c("group", "replicate"), sep = "_", extra = "drop") %>%
+  dplyr::select(mz, intensity, group, Region, replicate)%>% 
+  filter(group %in% c("hbnc", "hboc") )
+
+
+df_long_r$name <- names(mz_names)[match(df_long_r$mz, mz_names)]
+
+df_long_all <- rbind(df_long, df_long_r)
+df_long_all$Region <- factor(df_long_all$Region, levels = c("Whole lens", "OC", "IC", "Core"))
+# 
+png(paste0(fig_path, "whole_lens_comparison_seg.png"), width = 2700, height = 3300, res = 500)
+
+p_bar <- ggplot(df_long_all %>% 
+         filter(name %in%  c("GSH", "CySSG", "Cysteine")) %>%
+         mutate(name = factor(name, 
+                              levels = c("GSH", 
+                                         "CySSG", 
+                                         "Cysteine"))), 
+       aes(x = group, y = intensity)) +
+  stat_summary(fun = mean, 
+               geom = "bar", 
+               aes(fill = group), 
+               alpha = 0.45, 
+               position = position_dodge(width = 0.9)) +
+  stat_summary(fun.data = mean_sdl, 
+               fun.args = list(mult = 1), 
+               geom = "errorbar", 
+               width = 0.2, 
+               position = position_dodge(width = 0.9)) +
+  geom_point(aes(color = group), 
+             position = position_jitter(width = 0.1), 
+             size = 1) +
+  facet_grid(rows = vars(name),
+             cols = vars(Region)) +
+  labs(x = "Treatment", y = expression(log[10](intensity))) +
+  geom_signif(
+    comparisons = list(c("hbnc", "hboc")),  
+    map_signif_level = TRUE,
+    test = "t.test",
+    y_position = 4.5
+  ) + ylim(-0.2,5.5)+
+  scale_fill_manual(values = c("#6A9BCB", "#CB5148"), 
+                    labels = c("HBNc", "HBOc") ) +
+  scale_color_manual(values = c("#6A9BCB", "#CB5148"), 
+                     labels = c("HBNc", "HBOc") ) +
+  theme_article(base_size = 14) +
+  theme(  axis.text.y = element_text(size = 14),
+  strip.text = element_text(face = "bold", size = 13),
+  legend.position = "bottom",
+  axis.title.x = element_blank(), 
+  axis.ticks.x = element_blank(),
+  axis.text.x = element_blank(),   
+  legend.title = element_blank()
+  ) 
+print(p_bar)
+dev.off()
+
+
+png(paste0(fig_path, "whole_lens_comparison_seg_extended.png"), width = 3800, height = 6000, res = 400)
+
+ggplot(df_long_all %>%
+         filter(!name %in%  c("GSH", "CySSG", "Cysteine")),
+       aes(x = group, y = intensity)) +
+  stat_summary(fun = mean,
+               geom = "bar",
+               aes(fill = group),
+               alpha = 0.45,
+               position = position_dodge(width = 0.9)) +
+  stat_summary(fun.data = mean_sdl,
+               fun.args = list(mult = 1),
+               geom = "errorbar",
+               width = 0.2,
+               position = position_dodge(width = 0.9)) +
+  geom_point(aes(color = group),
+             position = position_jitter(width = 0.1),
+             size = 1) +
+  facet_grid(rows = vars(name),
+             cols = vars(Region)) +
+  labs(x = "Treatment", y = expression(log[10](intensity))) +
+  geom_signif(
+    comparisons = list(c("hbnc", "hboc")),
+    map_signif_level = TRUE,
+    test = "t.test",
+    y_position = 4.5
+  ) + ylim(-0.2,5.5)+
+  scale_fill_manual(values = c("#6A9BCB", "#CB5148"),
+                    labels = c("HBNc", "HBOc") ) +
+  scale_color_manual(values = c("#6A9BCB", "#CB5148"),
+                     labels = c("HBNc", "HBOc") ) +
+  theme_article() +
+  theme(strip.text = element_text(size = 13, face = "bold"),
+    legend.position = "bottom",
+    axis.text.y = element_text(size = 12),
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),
+    legend.title = element_blank()
+  )
+
+dev.off()
+```
+
+### 3.1.2 Volcano plot by region 
+```{r, message = FALSE, warning=FALSE}
+#Baseline comparison
+my_comparisons <- list(c("hbnc","hboc"))
+param <- SnowParam(workers = 2,  progressbar = F)
+comparison_res <- bplapply(rownames(mean_sp_df), 
+                           function(mz) {
+  compare_groups_stats(mean_sp_df, mz, my_comparisons)
+}, BPPARAM = param)
+
+comparison_res_df <- do.call(rbind, comparison_res)
+comparison_res_df$region <- factor(comparison_res_df$region, 
+                                   levels = c("OC", "IC", "Core"))
+comparison_res_df$Label <- names(mz_names)[match(comparison_res_df$m.z, mz_names)] 
+
+filtered_df <- comparison_res_df %>%
+  filter(is.finite(log2FC), is.finite(-log10(p_value)))
+filtered_df <- comparison_res_df %>%
+  filter(is.finite(log2FC), is.finite(-log10(p_value))) %>%
+  mutate(Significance = ifelse(abs(log2FC) > 0.5 & p_value < 0.05, "Sig", "Non-sig"),
+         change = case_when(
+      log2FC > 0.5 & p_value < 0.05 ~ "Increased",
+      log2FC < -0.5 & p_value < 0.05 ~ "Decreased",
+      TRUE ~ "Not Sig"
+    ),
+    size_plot = ifelse(change == "Not Sig", 0.5, -log10(p_value))
+         )
+```
+
+```{r, message= FALSE, warning= FALSE}
+png(paste0(fig_path, "volcano_plot_hbnc_hboc.png"), width = 2500, height = 2000, res = 400)
+p_vol <- ggplot() +
+  geom_jitter(data = filtered_df %>% 
+                filter(change == "Not Sig"), 
+              aes(x = region,
+                  y = log2FC,
+                  color = change), 
+              size = 0.6,
+              alpha = 0.3, 
+              position = position_jitter(width = 0.3)) +
+  geom_jitter(data = filtered_df %>% 
+                filter(!change == "Not Sig", is.na(Label) == T),
+              aes(x = region,
+                  y = log2FC, 
+                  size = size_plot,
+                  color = change),
+              alpha = 0.35, 
+              position = position_jitter(width = 0.3)) +
+  geom_jitter(
+    data = filtered_df %>% 
+      filter(Significance == "Sig", !is.na(Label) == T),
+    aes(x = region, 
+        y = log2FC, 
+        fill = change, 
+        size = size_plot),
+    shape = 21, color = "black", stroke = 1.2,
+    position = position_jitter(width = 0.3, seed =1)
+  ) +
+  labs(x = "Lens segmentation",
+       y = expression("HBOc vs HBNc (log"[2]*"[FC])"))+
+  scale_color_manual(values = c("Decreased" = "#7d3d92", 
+                                "Increased" = "#F7be07", 
+                                "Not Sig" = "gray")) +
+  scale_fill_manual(values = c("Decreased" ="#7d3d92", 
+                             "Increased" = "#F7be07", 
+                             "Not Sig" = "gray"))+
+  geom_text_repel(
+  data = filtered_df %>% 
+    filter(Significance == "Sig", !is.na(Label) == T),
+  aes(x = region, y = log2FC, label = Label),
+  color = "black",
+  size = 3.5,
+  max.overlaps = 20,
+  box.padding = 0.4,
+  min.segment.length = 0,
+  segment.color = "black",
+  position = position_jitter(width= 0.3, seed =1)
+)+
+  scale_size(range = c(1, 6)) +
+  geom_hline(yintercept = c(-0.5, 0.5), 
+             linetype = "dashed", 
+             color = "#999999") +
+  theme_article(base_size = 14) +
+  theme( axis.text.x = element_text(size = 14),  
+  axis.text.y = element_text(size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank()
+  ) +
+  guides(size = "none",
+         fill = "none",
+         color = guide_legend(override.aes = list(alpha = 1, size = 3))) 
+print(p_vol)
+dev.off()
+```
+
+### 3.1.3 Heatmap by region
+Prepare Heatmap data
+```{r, message= FALSE, warning= FALSE}
+# Filter target molecules
+region_filter <- region_df[which(as.numeric(rownames(region_df)) %in% mz_names),]
+rownames(region_filter) <- names(mz_names)[match(as.numeric(rownames(region_filter)), mz_names)]
+region_filter[region_filter <= 0] <- 0
+region_filter_mt <- as.matrix(region_filter)
+
+OC_cols   <- grep("@OC$", colnames(region_filter_mt), value = TRUE)
+IC_cols   <- grep("@IC$", colnames(region_filter_mt), value = TRUE)
+Core_cols <- grep("@Core$", colnames(region_filter_mt), value = TRUE)
+
+log_OC   <- region_filter_mt[, OC_cols]
+log_IC   <- region_filter_mt[, IC_cols]
+log_Core <- region_filter_mt[, Core_cols]
+
+log_OC <- log_OC %>% as.data.frame() %>%
+                 select(matches("hbnc|hboc")) %>% as.matrix()
+log_IC <- log_IC %>% as.data.frame() %>%
+                 select(matches("hbnc|hboc")) %>% as.matrix()
+log_Core <- log_Core %>% as.data.frame() %>%
+                 select(matches("hbnc|hboc")) %>% as.matrix()
+```
+
+Heatmap Parameters
+```{r}
+col_fun <- colorRamp2(c(0,2.5, 5),  c("#2872d1", "white", "#ff0d0d"))
+# col_fun <- colorRamp2(c(-2,0,2), c("#13a075", "white", "#e69f03"))
+# col_fun <- colorRamp2(c(-2,0,2), c("#B3A9EB", "white", "#ffa500"))
+col_fun <- colorRamp2(c(0,1,2,3,5), c("#69AADB", "#cae5f8", "#FAEFF5","#F2C5DA", "#D45590"))
+# col_fun <- colorRamp2(c(-2,0,2), c("#0f86a9", "white", "#FC8452"))
+```
+
+
+
+```{r, message= FALSE, warning= FALSE}
+sample_OC <- sub("_.*", "", colnames(log_OC))
+sample_IC <- sub("_.*", "", colnames(log_IC))
+sample_Core <- sub("_.*", "", colnames(log_Core))
+
+group_colors <- c("hbnc" = "#6A9BCB", "hboc" = "#CB5148")
+col_fun <- circlize::colorRamp2(
+  c(min(c(log_OC, log_IC, log_Core), na.rm = TRUE), 
+    median(c(log_OC, log_IC, log_Core), na.rm = TRUE), 
+    max(c(log_OC, log_IC, log_Core), na.rm = TRUE)),
+                      c("#440154", "#21908C", "#FDE725")
+  ) 
+
+col_anno <- HeatmapAnnotation(
+  Group = sample_OC,
+  col = list(Group = group_colors),
+  annotation_name_gp = gpar(fontsize = 0, col = NA)  
+)
+
+```
+
+Draw Heatmap
+```{r, message= FALSE, warning= FALSE}
+ht_OC <- Heatmap(
+    log_OC,
+    name = "Relative Intensity",
+    col = col_fun,
+    column_title = "OC",
+    top_annotation = col_anno,
+    show_column_names = FALSE,
+    cluster_columns = FALSE,
+    cluster_rows = TRUE,
+    row_names_side = "right",
+    row_names_gp = gpar(fontsize = 9),
+    show_row_dend = FALSE,
+    rect_gp = gpar(col =NA, fill =NA),
+    cell_fun = cell_fun,   
+    heatmap_legend_param = list(
+        at = c(min(log_OC, na.rm = TRUE), max(log_OC, na.rm = TRUE)),
+        labels = c("Min", "Max")
+    )
+)
+
+
+ht_IC <- Heatmap(
+    log_IC,
+    name = "Relative Intensity",
+    col = col_fun,
+    column_title = "IC",
+    top_annotation = col_anno,
+    show_column_names = FALSE,
+    cluster_columns = FALSE,
+    cluster_rows = TRUE,
+    show_row_dend = FALSE,
+    row_names_side = "right",
+    row_names_gp = gpar(fontsize = 9),
+    rect_gp = gpar(col =NA, fill =NA),
+    cell_fun = cell_fun,   
+    heatmap_legend_param = list(
+        at = c(min(log_OC, na.rm = TRUE), max(log_OC, na.rm = TRUE)),
+        labels = c("Min", "Max")
+    )
+)
+
+
+ht_Core <- Heatmap(
+    log_Core,
+    name = "Relative Intensity",
+    col = col_fun,
+    column_title = "Core",
+    top_annotation = col_anno,
+    show_column_names = FALSE,
+    cluster_columns = FALSE,
+    cluster_rows = TRUE,
+    show_row_dend = FALSE,
+    rect_gp = gpar(col =NA, fill =NA),
+    row_names_side = "right",
+    row_names_gp = gpar(fontsize = 9),
+    cell_fun = cell_fun,   
+    heatmap_legend_param = list(
+        at = c(min(log_OC, na.rm = TRUE), max(log_OC, na.rm = TRUE)),
+        labels = c("Min", "Max")
+    )
+)
+
+
+
+png(paste0(fig_path,"heatmap_HBNC_HBOC_new.png"), width = 4000, height = 2900, res=500)
+p_heatmap <- draw(ht_OC + ht_IC + ht_Core, heatmap_legend_side = "right")
+dev.off()
+```
+
+### 3.1.4 Violin Plot
+```{r, message=FALSE, warning=FALSE}
+bin_sp_target <- bin_sp[which(as.numeric(rownames(bin_sp)) %in% mz_names), ]
+bin_sp_target <- bin_sp_target+1
+
+df_long <- bin_sp_target %>%
+  tibble::rownames_to_column(var = "m/z") %>%
+  pivot_longer(-`m/z`, names_to = "colname", values_to = "intensity") %>%
+  separate(colname, into = c("group", "x", "y", "region"), sep = "@") %>%
+  mutate(`m/z` = as.factor(`m/z`),
+         Treatment = sub("_.*", "", group))
+
+df_long$name<- names(mz_names)[match(df_long$`m/z`, mz_names)]
+
+df_long$region <- factor(df_long$region, levels = c("OC", "IC", "Core"))
+
+# my_color <- c("#87b6a2", "#4191c7", "#ba5b59",
+#                "#e39a56", "#4b5f66", "#7976a3")
+# 
+# p1 <- ggplot(df_long %>%  
+#                filter(`m/z` %in%  mz_names[1:6], 
+#                       Treatment %in% c("hbnc", "hboc") ),
+#              aes(x = Treatment, 
+#                  y = log10(intensity), 
+#                  fill = Treatment)) +
+#     geom_half_violin(aes(group = Treatment),
+#                      side = "r",
+#                      position = position_nudge(x = .25, y = 0),
+#                      linewidth= 0.4) +
+#     geom_boxplot(position = position_nudge(x = .25, y = 0),
+#                  width = 0.15,
+#                  alpha = 0.85,
+#                  outlier.shape = NA,
+#                  color = "black",
+#                  show.legend = FALSE) +
+#     geom_jitter(aes(color = Treatment),
+#                 size = 0.5,
+#                 alpha = 0.1,
+#                 width = 0.1,
+#                 show.legend = FALSE) + 
+#     scale_fill_manual(values = my_color)+
+#     scale_color_manual(values = my_color,guide='none') +
+#     facet_grid(rows = vars(region), cols = vars(name)) +  
+#     theme_test(base_size = 10) +
+#     theme(
+#         legend.title =element_blank(),
+#         strip.text = element_text(face = "bold"))
+
+
+png(paste0(fig_path, "violin_plot.png"), width = 2500, height = 5000, res = 400)
+ggplot(df_long %>%  
+               filter(Treatment %in% c("hbnc", "hboc") ),
+             aes(x = region, 
+                 y = log10(intensity), 
+                 fill = Treatment)) +
+  geom_violin(alpha = 0.45)+
+  facet_grid(rows = vars(name), scales = "free")+
+   scale_y_continuous(labels = function(x)  c(rep(x="",times=length(x)-2),x[length(x) -1],"")
+      ) +
+  scale_fill_manual(values = c("#6A9BCB", "#CB5148"), 
+                    labels = c("HBNc", "HBOc") )+
+  theme_article()+
+  theme(strip.text = element_text(face = "bold"),
+        panel.spacing = unit(0,"lines"), 
+    legend.position = "top",
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_text(size = 14),
+    axis.title.x = element_blank(),
+    legend.title = element_blank()
+  ) +
+   labs(x = "Treatment", y = expression(log[10](intensity)))
+dev.off()
+```
+
+
+## 3.2 Layer 3 analysis
+
+### 3.2.1 Co-registration
+Lens shape model
+```{r, message=FALSE, warning=FALSE}
+lens_m <- read.csv(paste0(dataset_path, "Model_lens.csv"))
+outline <- data.frame(z.final = lens_m$z,
+                      r.final = lens_m$r)
+outline<- standardize_coordinates(lens_m)
+outline<- as.data.frame(outline$X)
+colnames(outline) <- c("y", "x")
+outline <- outline %>%
+  relocate(x, .before = y)
+outline$group <- 1
+```
+
+```{r, eval=F, include=FALSE}
+fig_model <- ggplot(lens_m, aes(z,r))+
+  geom_point()+
+  coord_equal()+
+  theme_void()
+```
+
+```{r, message=FALSE, warning=FALSE}
+# bin_info <- as.data.frame(str_split_fixed(colnames(bin_sp_on_tissue), "@", 4))
+coordata <- bin_info[,c("x", "y", "run", "on_tissue")]
+coordata <- find_edge_m(coordata)
+
+fig_edge <- coordata %>% 
+  filter(edge == TRUE) %>%
+  ggplot(aes(x, y)) +
+  geom_point(color ="#ff7300") +
+  coord_equal() +
+  theme_article() +
+  facet_wrap(vars(run), ncol = 6) +
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())+
+  theme_article()+
+  theme(axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank())
+print(fig_edge)
+
+# save(coordata, file = paste0(dataset_path, "edge.Rdata"))
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Apply Baycentric Deformation Model
+res <- align_to_model(coordata, lens_m)
+transform_df <- res$transform_df
+lens_e_t_df <- res$lens_e_t_df
+
+coordata$r.final <- lens_e_t_df$r.final
+coordata$z.final <- lens_e_t_df$z.final
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+# Plot the moving displacement
+plot_e2m_displacement(transform_df)
+# +
+#   theme_void()+
+#   theme(legend.title = element_blank(),
+#         strip.text = element_blank()) -> fig_movement
+# 
+# print(fig_movement)
+
+
+transform_ex <- transform_df %>% 
+  filter(run == "hbnc_a_trim")
+
+png(paste0(fig_path, "Deformation_iii.png"), width = 1500, height = 2400, res = 350)
+ggplot(transform_ex) +
+  geom_point(aes(z.m, r.m), alpha = 0.5) +
+  geom_point(aes(z.e, r.e, color = status)) +
+  geom_segment(
+      aes(
+        y = r.e, x = z.e,  
+        yend = r.m, xend = z.m, 
+        color = status
+      ),
+      arrow = arrow(length = unit(0.085, "cm")), 
+      linewidth = 0.5
+    ) +
+  scale_color_manual(values = rev(c("#4f7ba8", "#eb8386"))) +
+  coord_equal() +
+  theme_void() +
+  theme(legend.position = "none")
+dev.off()
+```
+
+```{r}
+GSH_DF <- intensity(data = bin_sp,
+          mz = 306.0773,
+          tol = 15, 
+          unit = "ppm") %>% 
+  filter(run == "hbnc_a_trim") %>%
+  cbind(coordata %>% filter(run == "hbnc_a_trim")  %>% 
+          select(-run))  %>%
+  mutate(
+    intensity_rank = case_when(
+      intensity == 0            ~ 0,
+      intensity > 0             ~ percent_rank(intensity[intensity > 0])
+    )
+  )
+   
+
+fig_raw <- ggplot(GSH_DF, 
+       aes(x,y, fill = intensity_rank)) +
+  geom_raster()+
+  coord_equal()+
+  theme_void()+
+  theme(legend.position = "none")+
+  scale_fill_gradientn(
+        colours = c("grey90", rev(lens_palette)),
+        limits  = c(0, 1),
+        )
+
+
+fig_deform <- ggplot(GSH_DF, 
+       aes(z.final, r.final, fill = intensity_rank)) +
+  geom_voronoi(outline = outline)+
+  coord_equal()+
+  theme_void()+
+  theme(
+    axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = "none"
+  )+
+  scale_fill_gradientn(
+        colours = c("grey90", rev(lens_palette)),
+        limits  = c(0, 1),
+        )
+
+
+png(paste0(fig_path, "Deformation.png"), width = 4500, height = 2400, res = 350)
+combined_fig <- fig_raw + fig_deform + plot_layout(ncol = 2)
+combined_fig
+dev.off()
+```
+
+```{r, include=FALSE, eval=FALSE}
+library(patchwork)
+png(paste0(fig_path, "Deformation.png"), width = 4500, height = 2400, res = 350)
+(fig_model | fig_edge | fig_movement) +   
+  plot_layout(ncol = 3, widths = c(1, 1, 1), guides = "collect") &
+  theme(plot.margin = margin(10, 10, 10, 10))  
+dev.off()
+```
+
+
+### 3.2.2 HexBin
+HexBin the coordinates 
+```{r, eval=FALSE, include=TRUE}
+pixel_info <- as.data.frame(coordata)
+bin <- hexbin(pixel_info$r.final, pixel_info$z.final, 
+              xbins = round(sqrt(nrow(pixel_info)/6/length(unique(pixel_info$run)))), 
+              IDs = TRUE)
+pixel_info$bin <- bin@cID
+pixel_info$bin <- as.factor(pixel_info$bin)
+
+write.csv(pixel_info, paste0(dataset_path, "pixel_info.csv"), row.names = F)
+
+
+ggplot(pixel_info, aes(z.final, r.final))+
+  geom_point()+
+  facet_wrap(vars(run), ncol = 6)+
+  coord_equal()+
+  theme_article()+
+  theme(axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank())
+#pixel_info <- read.csv(paste0(dataset_path, "pixel_info.csv"))
+```
+
+Average the pixel intensities in every HexBin
+```{r, eval=FALSE, include=TRUE}
+hexbin_df_all <- HexBin_Signal(data = bin_sp,
+                               pixel_info = pixel_info)
+write.csv(hexbin_df_all, paste0(dataset_path, "hexbin_df_all.csv"))
+# hexbin_list <- list()
+# 
+# for (scan in unique(pixel_info$run)) {
+#   
+#    for (hexbin in unique(pixel_info$bin)) {
+#     idx_run <- pixel_info$run == scan
+#     idx_hexbin <- pixel_info$bin == hexbin
+#     
+#     hexbin_idx <- '&'(idx_run, idx_hexbin)
+#     
+#     hexbin_df <- bin_sp_on_tissue[, hexbin_idx, drop = F]
+#     
+#     if (ncol(hexbin_df) == 0) next
+#     mean_vec <- rowMeans(hexbin_df)
+#     
+#     temp <- data.frame(mean_intensity = mean_vec, row.names = names(mean_vec))
+#     colnames(temp) <- paste(scan, hexbin, sep = "@")
+#     hexbin_list[[paste(scan, hexbin, sep = "@")]] <- temp
+#   }
+#   
+#   
+# }
+# 
+# hexbin_df_all <- do.call(cbind, hexbin_list)
+
+```
+
+
+```{r, eval=FALSE, include=TRUE}
+hexbin_info <- hexbin_df_all %>%
+  tibble::rownames_to_column("mz") %>%
+  filter(mz == "306.0773") %>%
+  pivot_longer(
+    cols = -mz,
+    names_to = "sample",
+    values_to = "intensity"
+  ) %>%
+  separate(sample, into = c("run", "bin"), sep = "@")
+
+hexbin_info$bin <- as.factor(hexbin_info$bin)
+hexbin_info <- merge(pixel_info, hexbin_info, by = c("run", "bin"), 
+                     all.x = T)
+hexbin_info$treatment <- sub("_.*", "", hexbin_info$run)
+hexbin_info$intensity[is.na(hexbin_info$intensity)] <- 0
+
+intensity_range <- hexbin_info %>%
+  filter(run %in% c("hbnc_a_trim", "hboc_c_trim")) %>%
+  summarise(min_val = min(intensity, na.rm = TRUE),
+            max_val = max(intensity, na.rm = TRUE))
+ 
+write.csv(hexbin_info %>% dplyr::select(-intensity, -mz), paste0(dataset_path, "hexbin_info.csv"), row.names = F)
+
+# 
+# hexbin_info <- read.csv(paste0(dataset_path, "hexbin_info.csv"))
+
+# outline<- standardize_coordinates(lens_m)
+# outline<- as.data.frame(outline$X)
+# colnames(outline) <- c("y", "x")
+# outline <- outline %>%
+#   relocate(x, .before = y)
+# outline$group <- 1
+ggplot(hexbin_info %>% 
+         filter(run %in% c("hbnc_a_trim", "hboc_c_trim")),
+       aes(x,y))+
+  geom_raster(aes(fill = intensity))+
+  facet_wrap(vars(run))+
+  coord_equal()+
+  scale_fill_viridis(
+    option = "D"
+  ) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+
+ggplot(hexbin_info %>% 
+         filter(run %in% c("hbnc_a_trim", "hboc_c_trim")),
+       aes(z.final,r.final))+
+  geom_voronoi(aes(fill = intensity), outline = outline)+
+  facet_wrap(vars(run))+
+  coord_equal()+
+  scale_fill_viridis(
+    option = "D"
+  ) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank()
+  )
+
+
+
+png(paste0(fig_path, "GSH_ex.png"), width = 2000, height = 1300, res = 350)
+ggplot(hexbin_info %>% filter(run %in% c("hbnc_a_trim", "hboc_c_trim"))) +
+  geom_voronoi(aes(z.final, r.final, fill = intensity), outline = outline) +
+  coord_equal() +
+  facet_wrap(vars(run)) +
+  scale_fill_viridis(
+    option = "D",
+    name = NULL,  
+    breaks = c(intensity_range$min_val, intensity_range$max_val),
+    labels = c("Min", "Max")
+  ) +
+  theme_article() +
+  theme(
+    axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank()
+  )
+  
+dev.off()
+
+# png(paste0(fig_path, "GSH_raw.png"), width = 2000, height = 1300, res = 350)
+# ggplot(hexbin_info %>% filter(treatment %in% c("hbnc", "hboc"))) +
+#   geom_raster(aes(x, y, fill = intensity), interpolate = TRUE) +
+#   coord_equal() +
+#   facet_wrap(vars(run)) +
+#   scale_fill_viridis(option = "D") +
+#   theme_article() +
+#   theme(
+#     axis.title = element_blank(),
+#     axis.text  = element_blank(),
+#     axis.ticks = element_blank(),
+#     panel.background = element_rect(fill = "black", colour = NA),
+#     plot.background  = element_rect(fill = "black", colour = NA),
+#     strip.background = element_rect(fill = "grey20", colour = NA),
+#     strip.text       = element_text(color = "white"),
+#     legend.background = element_rect(fill = "black", colour = NA),
+#     legend.text = element_text(color = "white"),
+#     legend.title = element_text(color = "white")
+#   )
+# 
+#   
+# dev.off()
+
+```
+
+Average the molecular intensity across HexBins
+```{r, eval=FALSE, include=TRUE}
+hexbin_average_df <- Average_HexBin_intensity(data = hexbin_df_all)
+write.csv(hexbin_average_df, paste0(dataset_path, "hexbin_average_df.csv"), row.names = T)
+```
+
+### 3.2.3 Dimensionality reduction
+```{r, message=FALSE, warning=FALSE}
+hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+
+info <- as.data.frame(str_split_fixed(colnames(hexbin_average_df), "@", 2))
+colnames(info) <- c("treatment", "bin")
+hexbin_average_flt <- hexbin_average_df[, which(info$treatment %in% c("hbnc", "hboc"))]
+```
+
+Plot UMAP plot by treatment
+```{r, message=FALSE, warning=FALSE}
+set.seed(2026)
+umap_mt <- t(hexbin_average_flt)
+umap_baseline <- uwot::umap(umap_mt,
+                       n_neighbors = 100,
+                       min_dist = 0.5)
+
+umap_baseline <- umap_baseline %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "sample") %>%
+  mutate(
+    treatment = str_split_fixed(sample, "@", 2)[,1],
+    bin       = str_split_fixed(sample, "@", 2)[,2]
+  ) %>%
+  select(-sample) %>%
+  { setNames(., c("UMAP_1", "UMAP_2", "treatment", "bin")) }
+
+
+png(paste0(fig_path, "umap_baseline_treatment.png"), width = 2000, height = 1800, res = 500)
+ggplot(umap_baseline, aes(UMAP_1, UMAP_2, color = treatment)) +
+  geom_point(alpha = 0.5) +
+  theme_article() +
+  theme(
+    legend.key.width = unit(0.01, "cm"),    
+    legend.spacing.x = unit(0.005, "cm"),
+    legend.title = element_blank(),
+    legend.position = "inside",
+    legend.position.inside = c(0.9, 0.92),
+    axis.text = element_blank(),
+    axis.ticks = element_blank()
+    ) +
+  scale_color_manual(
+    values = c("hbnc" = "#6A9BCB", "hboc" ="#CB5148"),
+    labels = c("hbnc" = "HBNc", "hboc" = "HBOc")
+  ) + 
+  xlim(-12.5, 12.51822)
+dev.off()
+```
+
+Plot UMAP plot by segmentation
+```{r, eval= FALSE, include= TRUE}
+set.seed(1)
+umap_baseline <- umap_baseline %>%
+  mutate(cluster = as.factor(kmeans(select(., UMAP_1, UMAP_2), centers = 6)$cluster))
+
+write.csv(umap_baseline, paste0(dataset_path, "umap_baseline.csv"), row.names = F)
+# 
+png(paste0(fig_path, "umap_baseline_comparison.png"), width = 2000, height = 1800, res = 500)
+ggplot(umap_baseline, aes(UMAP_1,UMAP_2, color = cluster))+
+  geom_point(alpha = 0.8)+
+  theme_article()+
+  scale_color_manual(values = c(
+    "1" = "#ff8787",
+    "2" = "#fa5252",
+    "3" = "#b8d0e7",
+    "4" = "#4f86bc",
+    "5" = "#014f97",  
+    "6" = "#ffc9c9"
+  ))+
+  theme(legend.title = element_blank(),
+        legend.position = "inside",
+        legend.key.width = unit(0.01, "cm"),    
+    legend.spacing.x = unit(0.005, "cm"),
+        legend.position.inside = c(0.93, 0.85),
+    axis.text  = element_blank(),  
+    axis.ticks = element_blank()  
+  )+ 
+  xlim(-12.5, 12.51822)
+dev.off()
+```
+
+Plot lens projection 
+```{r, eval=FALSE, include=TRUE}
+umap_baseline <- umap_baseline %>%
+  left_join(hexbin_info, by = c("treatment", "bin")) %>%
+  mutate(cluster = as.factor(cluster))
+
+png(paste0(fig_path, "umap_projection.png"), width = 3000, height = 1800, res = 500)
+ggplot(umap_baseline %>% filter(run %in% c("hbnc_a_trim", "hboc_a_trim"))) +
+  geom_voronoi(aes(z.final, r.final, fill = cluster), outline =  outline)+
+  coord_equal()+
+  facet_wrap(vars(run),
+             labeller = labeller(run = c(
+      "hbnc_a_trim" = "HBNc",
+      "hboc_a_trim" = "HBOc"
+    )) ) +
+  scale_fill_manual(values = c(
+    "1" = "#ff8787",
+    "2" = "#fa5252",
+    "3" = "#b8d0e7",
+    "4" = "#4f86bc",
+    "5" = "#014f97",  
+    "6" = "#ffc9c9"
+  ))+
+  theme_article()+
+  theme(
+    axis.title = element_blank(),  
+    axis.text  = element_blank(),  
+    axis.ticks = element_blank(),
+    )
+
+dev.off()
+```
+
+
+### 3.2.4 FC plot
+Calculate the Fold change across all HexBins 
+```{r, message=FALSE, warning=FALSE}
+HexBin_FC <- HexBin_FC_calculation(data = hexbin_average_flt,
+                                   group1 = "hbnc",
+                                   group2 = "hboc")
+
+#write.csv(HexBin_FC, paste0(dataset_path, "HexBin_FC_baseline_comparison.csv"))
+```
+
+Plot
+```{r, message=FALSE, warning= FALSE}
+faceted_fc_data_clean <- HexBin_FC_for_plot(HexBin_FC = HexBin_FC, 
+                                            mz = mz_names, 
+                                            mz_tol = 30, 
+                                            umap_res = umap_baseline,
+                                            reference = "hbnc")
+
+umap.res.ref <- umap_baseline %>%
+  filter(treatment == "hbnc", cluster %in% c(3, 4, 5)) %>%
+  mutate(cluster_label = recode_factor(
+    cluster,
+    `3` = "Core",
+    `4` = "IC",
+    `5` = "OC"
+  ))
+
+umap.res.ref$cluster_label <- factor(umap.res.ref$cluster_label, levels =  c("Core", "IC", "OC"))
+
+colors <- c(
+  "Core" = "#5e90b8",
+  "IC"      = "#eeb8c3",
+  "OC"      = "#e77c8e"
+)
+
+p1 <- ggplot(umap.res.ref, aes(x = UMAP_2, fill = cluster_label)) +
+  geom_histogram(position = "identity", alpha = 0.4, bins = 30) +
+  scale_fill_manual(values = colors, name = NULL) +
+  theme_article() +
+  theme(
+    legend.position = "top",
+    axis.title.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank()
+  )
+
+p2 <- ggplot(faceted_fc_data_clean %>% filter(compound %in% c("GSH")), 
+             aes(x = UMAP_2, y = log2(fc), color = "#b43335")) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  geom_smooth(
+    aes(fill = compound, group = compound), color = "#b43335",
+    method = "loess",
+    se = F,
+    alpha = 0.2,
+    linewidth = 1.5
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.5) +
+  facet_grid(cols = vars(compound) ) +
+  theme_article() +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 10)  
+  )+
+  guides(color = "none", fill = "none")
+
+p3 <- ggplot(faceted_fc_data_clean %>% filter(compound %in% c("CySSG", "Cysteine" )), 
+             aes(x = UMAP_2, y = log2(fc), color = compound)) +
+  geom_point(alpha = 0.2, size = 1.5) +
+  geom_smooth(
+    aes(fill = compound, group = compound),
+    method = "loess",
+    se = F,
+    alpha = 0.4,
+    linewidth = 1.5
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.5) +
+  facet_wrap(vars(compound), ncol = 2 ) +
+  scale_color_manual(values = c("#fDbd1a", "#5b66a1")) +
+  scale_fill_manual(values = c("#fDbd1a", "#5b66a1")) +
+  theme_article() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 10)  
+  )+
+  guides(color = "none", fill = "none")
+
+library(patchwork)
+png(paste0(fig_path, "/umap_fc_example.png"), width = 2700, height = 2800, res = 450)
+(p1 / p2/ p3) + plot_layout(heights  = c(1.1, 1.8, 1.3))
+dev.off()
+```
+
+```{r, eval=FALSE, include=FALSE}
+custom_colors <- c(
+  "#E89DA0", "#88CEE6", "#f6c8a8","#9e6677", 
+  "#b2d3a4", "#1a4a49", "#C09F7E", "#8475C5",'#999999',  "yellowgreen", "violetred4", "wheat"
+)
+
+p4 <- ggplot(faceted_fc_data_clean %>% filter(!compound %in% c("CySSG", "Cysteine", "GSH")), 
+             aes(x = UMAP_2, y = log2(fc), color = compound)) +
+  geom_point(alpha = 0.1, size = 1.5) +
+  geom_smooth(
+    aes(fill = compound, group = compound),
+    method = "loess",
+    se = F,
+    alpha = 0.7,
+    linewidth = 1.5
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.5) +
+  facet_wrap(vars(compound), ncol = 3 ) +
+  scale_color_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  theme_article() +
+  theme(
+    axis.text.x  = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 10)  
+  )+
+  guides(color = "none", fill = "none")
+
+png(paste0(fig_path, "/umap_fc_extended.png"), width = 2700, height = 2600, res = 450)
+print(p4)
+dev.off()
+```
+
+
+### 3.2.5 Spatial correlation analysis
+```{r, message=FALSE, warning= FALSE, fig.width=15, fig.height=5.5}
+Correlation_plot(HexBin_FC, 
+                 pixel_info, 
+                 mz1 = "306.0773", 
+                 mz2 = "425.0815",
+                 umap.res.ref = umap.res.ref)
+
+png(paste0(fig_path, "GSH_CSH_cor.png"), width = 3200, height = 1250, res = 350)
+Correlation_plot(HexBin_FC,
+                 pixel_info,
+                 mz1 = "306.0773",
+                 mz2 = "120.0127",
+                 umap.res.ref = umap.res.ref)
+dev.off()
+```
+
+
+```{r}
+mz_names <- c("OPH" = 288.1209,
+              "GSH" = 306.0773,
+              "SDGSH" = 422.0885,
+              "Glutamic\nacid" = 146.0466,
+              "CySSG" = 425.0815,
+              "GSSG" = 611.1461,
+              "Oxoproline" = 128.0360,
+              "Cysteinyl\nglycine" = 177.0367,
+              "GGC" = 249.0582,
+              "GSSH" = 338.0491,
+              "SHGSH" = 336.0854,
+              "Cysteine" = 120.0127)
+
+HexBin_FC_target <- HexBin_FC[which(rownames(HexBin_FC) %in% mz_names),]
+
+data <- t(HexBin_FC_target)
+colnames(data) <- names(mz_names)[match(colnames(data), mz_names)]
+data <- log2(data)
+
+
+
+
+#OC 
+umap.res.ref_OC <- umap.res.ref %>% filter(cluster_label == "OC")
+data_OC <- data[which(rownames(data) %in% umap.res.ref_OC$bin ), ]
+
+
+p_OC <- ggpairs(
+  data_OC,
+  upper = list(continuous = my_upper),
+  lower = list(continuous = my_lower),
+  diag  = list(continuous = my_diag_text)
+) +
+  theme(
+    strip.text = element_blank(),        
+    panel.spacing = unit(0.9, "lines")   
+  )
+
+
+png(paste0(fig_path, "cor_OC.png"), width = 5500, height = 5550, res = 320)
+p_OC
+dev.off()
+
+
+#IC 
+umap.res.ref_OC <- umap.res.ref %>% filter(cluster_label == "IC")
+data_OC <- data[which(rownames(data) %in% umap.res.ref_OC$bin ), ]
+
+
+p_IC <- ggpairs(
+  data_OC,
+  upper = list(continuous = my_upper),
+  lower = list(continuous = my_lower),
+  diag  = list(continuous = my_diag_text)
+) +
+  theme(
+    strip.text = element_blank(),        
+    panel.spacing = unit(0.9, "lines")   
+  )
+
+
+png(paste0(fig_path, "cor_IC.png"), width = 5500, height = 5550, res = 320)
+p_IC
+dev.off()
+
+
+
+#Core
+umap.res.ref_OC <- umap.res.ref %>% filter(cluster_label == "Core")
+data_OC <- data[which(rownames(data) %in% umap.res.ref_OC$bin ), ]
+
+
+p_Core <- ggpairs(
+  data_OC,
+  upper = list(continuous = my_upper),
+  lower = list(continuous = my_lower),
+  diag  = list(continuous = my_diag_text)
+) +
+  theme(
+    strip.text = element_blank(),        
+    panel.spacing = unit(0.9, "lines")   
+  )
+
+
+png(paste0(fig_path, "cor_Core.png"), width = 5500, height = 5550, res = 320)
+p_Core
+dev.off()
+
+```
+
+```{r}
+my_upper <- function(data, mapping, ...) {
+  x <- eval_data_col(data, mapping$x)
+  y <- eval_data_col(data, mapping$y)
+
+  # Pearson correlation
+  r <- cor(x, y, method = "pearson", use = "pairwise.complete.obs")
+
+  ggplot() +
+    geom_tile(aes(0, 0, fill = r)) +
+    geom_text(aes(0, 0, label = sprintf("%.2f", r)), size = 9) +
+    scale_fill_gradientn(
+      name = "Pearson\ncorrelation",
+      colours = c(
+        "#0073a8", "#66b3e6", "#99d2e7", "white", "#ffb3b3", "#ff6666", "#cc3333"
+      ),
+      values = scales::rescale(c(-1, -0.5, -0.1, 0, 0.1, 0.5, 1)),
+      limits = c(-1, 1)
+    ) +
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_continuous(expand = c(0, 0)) +
+    theme_test()
+}
+
+
+my_lower <- function(data, mapping, ...) {
+  ggplot(data = data, mapping = mapping) +
+    stat_density_2d(
+      aes(fill = after_stat(level)),
+      geom = "polygon",
+      contour = TRUE
+    ) +
+    scale_fill_gradientn(
+      colours = c(
+        "#FFFFFF", "#17BECF", "#1F77B4", "#2CA02C",
+        "#FFFF00", "#FF7F0E", "#D62728", "#8B0000"
+      )
+    ) +
+    theme_test() +
+     theme(
+      axis.text.x = element_text(
+        angle = 45,
+        hjust = 1,
+        vjust = 1,
+        size  = 13,
+        color = "black"
+      ),
+      axis.text.y = element_text(
+        size  = 13,
+        color = "black"
+      )
+    )
+}
+
+
+
+my_diag_text <- function(data, mapping, ...) {
+  var_name <- as_label(mapping$x)
+
+  ggplot() +
+    geom_text(
+      aes(0, 0, label = var_name),
+      size = 5,
+      fontface = "bold"
+    ) +
+    scale_x_continuous(expand = c(0, 0)) +
+    scale_y_continuous(expand = c(0, 0)) +
+    theme_void()
+}
+
+```
+
+
+### 3.2.6 FC map
+```{r, eval=FALSE, include=FALSE}
+HexBin_FC <- load_csv(paste0(dataset_path, "HexBin_FC_baseline_comparison.csv"))
+hexbin_df_all <- load_csv(paste0(dataset_path, "hexbin_df_all.csv"))
+
+info <- as.data.frame(str_split_fixed(colnames(hexbin_df_all), "@", 2))
+colnames(info) <- c("run", "bin")
+info$treatment <- sub("_.*", "", info$run)
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+group1 = "hbnc"
+group2 = "hboc"
+
+pval_list <- list()
+
+for (bin in unique(info$bin)){
+  idx1 <- '&'(info$treatment == group1, info$bin == bin)
+  idx2 <- '&'(info$treatment == group2, info$bin == bin)
+  
+  if (sum(idx1)> 1 && sum(idx2) > 1) {
+    df1 <- hexbin_df_all[,idx1]
+    df2 <- hexbin_df_all[,idx2]
+    pvals <- apply(df1, 1, function(x, y) t.test(x, y)$p.value, y = df2)
+  } else {
+    pvals <- rep(NA, nrow(df1))
+    names(pvals) <- rownames(df1)
+  }
+  
+  pval_list[[as.character(bin)]] <- pvals
+}
+
+final_pvals <- as.data.frame(pval_list)
+rownames(final_pvals) <- rownames(df1)
+colnames(final_pvals) <- sub("^X", "", colnames(final_pvals))
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+pvals_flt <- as.data.frame(t(final_pvals[which(rownames(final_pvals) == 248.0713),]))
+pvals_flt$bin <- rownames(pvals_flt)
+colnames(pvals_flt) <- c("pvals", "bin")
+# pvals_flt$FDR <- p.adjust(pvals_flt$pvals)
+
+fc_GSH <- merge(fc_GSH, pvals_flt, by= c("bin"), all.x = T)
+
+png(paste0(fig_path, "GSH_fc_lens_proj_pval.png"), width = 1100, height = 1300, res = 350)
+
+ggplot(fc_GSH) +
+  geom_voronoi(
+    aes(
+      x = z.final,
+      y = r.final,
+      fill = ifelse(pvals > 0.1, NA, fc_vals)
+    ),
+    outline = outline
+  ) +
+  coord_equal() +
+  theme_article() +
+  scale_fill_gradient2(
+    low = "#2165aa",        
+    mid = "grey90",         
+    high = "#a02015",      
+    midpoint = 0,
+    limits = c(-3, 3),
+    oob = squish,
+    na.value = "grey90"      
+  ) +
+  labs(fill = expression(Log[2]*FC)) +
+  theme(
+    axis.title = element_blank(),
+    axis.text  = element_blank(),
+    axis.ticks = element_blank()
+  )
+dev.off()
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+png(paste0(fig_path, "GSH_fc_lens_proj_pval.png"), width = 1100, height = 1300, res = 350)
+Project_change_to_tissue(HexBin_FC = HexBin_FC,
+                     mz = 306.0773,
+                     umap.res.ref = umap.res.ref, 
+                     geom = lens_m, 
+                     type = "FC",
+                     final_pvals = final_pvals,
+                     pvals_cutoff = 0.1)
+dev.off()
+
+# png(paste0(fig_path, "CySSG_fc_lens_proj_pval.png"), width = 1100, height = 1300, res = 350)
+Project_change_to_tissue(HexBin_FC = HexBin_FC,
+                     mz = 425.0815,
+                     umap.res.ref = umap.res.ref, 
+                     geom = lens_m, 
+                     type = "FC",
+                     final_pvals = final_pvals,
+                     pvals_cutoff = 0.1)
+# dev.off()
+# 
+# png(paste0(fig_path, "Cysteinyl glycine_fc_lens_proj_pval.png"), width = 1100, height = 1300, res = 350)
+Project_change_to_tissue(HexBin_FC = HexBin_FC,
+                     mz = 248.0713,
+                     umap.res.ref = umap.res.ref, 
+                     geom = lens_m, 
+                     type = "FC",
+                     final_pvals = final_pvals,
+                     pvals_cutoff = 0.1)
+# dev.off()
+```
+
+### 3.2.7 Difference Map
+```{r, message=FALSE, warning=FALSE}
+HexBin_dff <- HexBin_diff_calculation(data = hexbin_average_flt,
+                                   group1 = "hbnc",
+                                   group2 = "hboc")
+
+png(paste0(fig_path, "GSH_diff_lens_proj.png"), width = 1100, height = 1300, res = 350)
+Project_change_to_tissue(HexBin_FC = HexBin_dff,
+                     mz = 306.0773,
+                     umap.res.ref = umap.res.ref, 
+                     geom = lens_m,
+                     type = "diff")
+dev.off()
+
+
+png(paste0(fig_path, "CySSG_diff_lens_proj.png"), width = 1100, height = 1300, res = 350)
+Project_change_to_tissue(HexBin_FC = HexBin_dff,
+                     mz = 425.0815,
+                     umap.res.ref = umap.res.ref, 
+                     geom = lens_m,
+                     type = "diff")
+dev.off()
+
+png(paste0(fig_path, "Cysteinyl glycine_diff_lens_proj.png"), width = 1100, height = 1300, res = 350)
+Project_change_to_tissue(HexBin_FC = HexBin_dff,
+                     mz = 248.0713,
+                     umap.res.ref = umap.res.ref, 
+                     geom = lens_m,
+                     type = "diff")
+dev.off()
+```
+
+## 3.3 Drug Treatment 
+```{r, message=FALSE, warning=FALSE}
+hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+info <- as.data.frame(str_split_fixed(colnames(hexbin_average_df), "@", 2))
+colnames(info) <- c("treatment", "bin")
+hexbin_average_flt <- hexbin_average_df[, which(info$treatment %in% c("hbnc", "hbnn", "hboc", "hbon"))]
+hexbin_average_flt<- t(hexbin_average_flt) 
+```
+
+```{r, eval=FALSE, include=FALSE, warning=FALSE}
+mean_sp_df <- load_csv(paste0(dataset_path, "mean_sp_df.csv"))
+region_df <- log10(mean_sp_df+1)
+```
+
+### 3.3.1 Venn diagram of bulk analysis
+```{r,  eval=FALSE, include=FALSE, message=FALSE, warning=FALSE}
+tt_hbnc_hboc <- run_ttest(region_df, "hbnc", "hboc")
+tt_hbnc_hbon <- run_ttest(region_df, "hbnc", "hbon")
+tt_hbnc_hbnn <- run_ttest(region_df, "hbnc", "hbnn")
+
+sig_hboc_increase <- tt_hbnc_hboc$mz[tt_hbnc_hboc$pvalue < 0.05 & tt_hbnc_hboc$change == "Increased"]
+sig_hbon_increase <- tt_hbnc_hbon$mz[tt_hbnc_hbon$pvalue < 0.05 & tt_hbnc_hbon$change == "Increased"]
+sig_hbnn_increase <- tt_hbnc_hbnn$mz[tt_hbnc_hbnn$pvalue < 0.05 & tt_hbnc_hbnn$change == "Increased"]
+
+venn_list_increase <- list(
+  HBOc = sig_hboc_increase,
+  HBOn = sig_hbon_increase,
+  HBNn = sig_hbnn_increase
+)
+
+png(paste0(fig_path, "venn_increase.png"), width = 1000, height = 800, res =350)
+plot(euler(venn_list_increase, shape = "circle"),
+          list(fill = c( "#2b6a99","#ff7300","#1b7c3d"), alpha = 0.9),
+          edges = list(col = NA),
+          quantities = list(type = "counts", 
+                            cex=0.9, 
+                            col = c("white")), 
+          legend = list(side = "right")
+          )
+dev.off()
+
+sig_hboc_decrease <- tt_hbnc_hboc$mz[tt_hbnc_hboc$pvalue < 0.05 & tt_hbnc_hboc$change == "Decreased"]
+sig_hbon_decrease <- tt_hbnc_hbon$mz[tt_hbnc_hbon$pvalue < 0.05 & tt_hbnc_hbon$change == "Decreased"]
+sig_hbnn_decrease <- tt_hbnc_hbnn$mz[tt_hbnc_hbnn$pvalue < 0.05 & tt_hbnc_hbnn$change == "Decreased"]
+
+venn_list_decrease <- list(
+  HBOc = sig_hboc_decrease,
+  HBOn = sig_hbon_decrease,
+  HBNn = sig_hbnn_decrease
+)
+
+png(paste0(fig_path, "venn_decrease.png"), width = 1000, height = 800, res =350)
+plot(euler(venn_list_decrease, shape = "circle"),
+          list(fill = c( "#2b6a99","#ff7300","#1b7c3d"), alpha = 0.9),
+          edges = list(col = NA),
+          quantities = list(type = "counts", 
+                            cex=0.9, 
+                            col = c("white")), 
+          legend = list(side = "right"))
+dev.off()
+```
+
+
+### 3.3.2 Bulk anslysis and segmentation amalysis
+```{r, eval=FALSE, include=FALSE}
+region_df <- log10(mean_sp_df+1)
+df_long <- region_df %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer(-mz, names_to = "sample", values_to = "intensity") %>%
+  mutate(replicate = sub("@.*", "", sample)) 
+df_avg <- df_long %>%
+  group_by(mz, replicate) %>%
+  summarise(mean_intensity = mean(intensity, na.rm = TRUE), .groups = "drop") %>%
+  pivot_wider(names_from = replicate, values_from = mean_intensity) %>%
+  tibble::column_to_rownames("mz")
+
+hbnc_cols <- c("hbnc_a_trim", "hbnc_b_trim", "hbnc_c_trim")
+hbnn_cols <- c("hbnn_a_trim", "hbnn_b_trim", "hbnn_c_trim")
+hboc_cols <- c("hboc_a_trim", "hboc_b_trim", "hboc_c_trim")
+hbon_cols <- c("hbon_a_trim", "hbon_b_trim", "hbon_c_trim")
+
+df_avg_select <- df_avg %>%
+  dplyr::select(all_of(c(hbnc_cols, hboc_cols, hbnn_cols, hbon_cols)))
+
+df_avg_select$mz <- rownames(df_avg_select)
+df_long <- df_avg_select %>%
+  pivot_longer(cols = all_of(c(hbnc_cols, hboc_cols, hbnn_cols, hbon_cols)),
+               names_to = "replicate",
+               values_to = "intensity") %>%
+  mutate(
+    group = case_when(
+      str_detect(replicate, "hbnc") ~ "hbnc",
+      str_detect(replicate, "hboc") ~ "hboc",
+      str_detect(replicate, "hbnn") ~ "hbnn",
+      str_detect(replicate, "hbon") ~ "hbon"
+    )
+  ) %>% filter(mz %in% mz_names) %>% select(mz, replicate, intensity, group)
+
+df_long$name <- names(mz_names)[match(df_long$mz, mz_names)]
+df_long$Region <- "Whole lens"
+```
+
+```{r, eval=FALSE, include=FALSE}
+df_long_r <- region_df %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer(-mz, names_to = "sample", values_to = "intensity") %>%
+  filter(mz %in% mz_names) %>% 
+  separate(sample, into = c("id_part", "Region"), sep = "@", remove = FALSE) %>%
+  separate(id_part, into = c("group", "replicate"), sep = "_", extra = "drop") %>%
+  dplyr::select(mz, intensity, group, Region, replicate)%>% 
+  filter(group %in% c("hbnc", "hboc", "hbnn", "hbon") )
+
+
+df_long_r$name <- names(mz_names)[match(df_long_r$mz, mz_names)]
+
+df_long_all <- rbind(df_long, df_long_r)
+df_long_all$Region <- factor(df_long_all$Region, levels = c("Whole lens", "OC", "IC", "Core"))
+# 
+# png(paste0(fig_path, "whole_lens_comparison_seg.png"), width = 2700, height = 3300, res = 600)
+
+ggplot(df_long_all %>% 
+         filter(name %in%  c("GSH", "CySSG", "Cysteinyl glycine")) %>%
+         mutate(name = factor(name, 
+                              levels = c("GSH", 
+                                         "CySSG", 
+                                         "Cysteinyl glycine"))), 
+       aes(x = group, y = intensity)) +
+  stat_summary(fun = mean, 
+               geom = "bar", 
+               aes(fill = group), 
+               alpha = 0.45, 
+               position = position_dodge(width = 0.9)) +
+  stat_summary(fun.data = mean_sdl, 
+               fun.args = list(mult = 1), 
+               geom = "errorbar", 
+               width = 0.2, 
+               position = position_dodge(width = 0.9)) +
+  geom_point(aes(color = group), 
+             position = position_jitter(width = 0.1), 
+             size = 1) +
+  facet_grid(rows = vars(name),
+             cols = vars(Region)) +
+  labs(x = "Treatment", y = expression(log[10](intensity))) +
+  geom_signif(
+    comparisons = list(c("hbnc", "hboc")),  
+    map_signif_level = TRUE,
+    test = "t.test",
+    y_position = 4.5
+  ) + ylim(-0.2,5.5)+
+  scale_fill_manual(values = c("#6A9BCB", "#014f97","#CB5148",  "#ff8787"),
+                    labels = c("HBNc",  "HBNn", "HBOc", "HBOn") ) +
+  scale_color_manual(values = c("#6A9BCB", "#014f97","#CB5148", "#ff8787"),
+                     labels = c("HBNc",  "HBNn", "HBOc", "HBOn") ) +
+  theme_article() +
+  theme(strip.text = element_text(face = "bold"),
+    legend.position = "top",
+    axis.title.x = element_blank(), 
+    axis.ticks.x = element_blank(),
+    axis.text.x = element_blank(),   
+    legend.title = element_blank()
+  ) 
+# 
+# dev.off()
+
+
+# png(paste0(fig_path, "whole_lens_comparison_seg_extended.png"), width = 7500, height = 3800, res = 500)
+# 
+# ggplot(df_long_all %>% 
+#          filter(!name %in%  c("GSH", "CySSG", "Cysteinyl glutamine")), 
+#        aes(x = group, y = intensity)) +
+#   stat_summary(fun = mean, 
+#                geom = "bar", 
+#                aes(fill = group), 
+#                alpha = 0.45, 
+#                position = position_dodge(width = 0.9)) +
+#   stat_summary(fun.data = mean_sdl, 
+#                fun.args = list(mult = 1), 
+#                geom = "errorbar", 
+#                width = 0.2, 
+#                position = position_dodge(width = 0.9)) +
+#   geom_point(aes(color = group), 
+#              position = position_jitter(width = 0.1), 
+#              size = 1) +
+#   facet_grid(cols = vars(name),
+#              rows = vars(Region)) +
+#   labs(x = "Treatment", y = expression(log[10](intensity))) +
+#   geom_signif(
+#     comparisons = list(c("hbnc", "hboc")),  
+#     map_signif_level = TRUE,
+#     test = "t.test",
+#     y_position = 4.5
+#   ) + ylim(-0.2,5.5)+
+#   scale_fill_manual(values = c("#6A9BCB", "#CB5148"), 
+#                     labels = c("HBNc", "HBOc") ) +
+#   scale_color_manual(values = c("#6A9BCB", "#CB5148"), 
+#                      labels = c("HBNc", "HBOc") ) +
+#   theme_article() +
+#   theme(strip.text = element_text(face = "bold"),
+#     legend.position = "top",
+#     axis.title.x = element_blank(), 
+#     axis.ticks.x = element_blank(),
+#     axis.text.x = element_blank(),   
+#     legend.title = element_blank()
+#   ) 
+# 
+# dev.off()
+```
+
+```{r, eval=FALSE, include=FALSE}
+my_comparisons <- list(c("hbnc","hboc"),
+                       c("hbnc","hbon") )
+
+param <- SnowParam(workers =2,  progressbar = TRUE)
+comparison_res <- bplapply(rownames(mean_sp_df), function(mz) {
+  compare_groups_stats(mean_sp_df, mz, my_comparisons)
+}, BPPARAM = param)
+comparison_res_df <- do.call(rbind, comparison_res)
+```
+
+```{r, eval=FALSE, include=FALSE}
+comparison_res_df <- comparison_res_df %>% 
+  mutate(comparison =  paste0(group2, "_vs_", group1))
+
+df_wide <- comparison_res_df %>%
+  select(m.z, region, comparison, log2FC, p_value) %>%
+  pivot_wider(
+    names_from = comparison,
+    values_from = c(log2FC, p_value)
+  )
+
+df_wide <- df_wide %>%
+  mutate(
+    sig1 = abs(log2FC_hboc_vs_hbnc) > 0.5 & p_value_hboc_vs_hbnc < 0.05,
+    sig2 = abs(log2FC_hbon_vs_hbnc) > 0.5 & p_value_hbon_vs_hbnc < 0.05,
+    sig_status = case_when(
+      sig1 & sig2 ~ "Both Significant",
+      sig1 & !sig2 ~ "Only hbnc vs hboc",
+      !sig1 & sig2 ~ "Only hbnc vs hbon",
+      TRUE ~ "Not Significant"
+    )
+  )
+
+df_wide <- df_wide %>%
+  mutate(
+    alpha_status = case_when(
+      sig_status %in% c("Only hbnc vs hboc", "Only hbnc vs hbon") ~ 0.9,
+      TRUE ~ 0.3
+    )
+  )
+
+df_wide$region <- factor(df_wide$region, levels = c("OC", "IC", "Core"))
+df_wide$sig_status <- factor(df_wide$sig_status, levels = c("Not Significant", "Both Significant", "Only hbnc vs hboc",
+"Only hbnc vs hbon"))
+
+label_df <- df_wide[df_wide$m.z %in% mz_names, ]
+label_df$label <- names(mz_names)[match(label_df$m.z, mz_names)]
+
+png(paste0(fig_path, "hbnc_hboc_hbon_fc_plot_3_rep.png") , width = 6000, height = 2500, res = 550)
+ggplot(df_wide <- df_wide %>%
+  filter(!if_any(everything(), ~ is.infinite(.))), 
+       aes(x = log2FC_hboc_vs_hbnc, y = log2FC_hbon_vs_hbnc)) +
+  facet_grid(cols = vars(region)) +
+  theme_article()+
+  theme(legend.position = "top",
+        legend.title = element_blank())+
+  xlim(-10,10)+
+  ylim(-10,10)+
+  coord_equal()+
+  labs(x = expression("HBOc vs HBNc (log"[2]*"[FC])"),
+       y = expression("HBOn vs HBNc (log"[2]*"[FC])"))+
+  geom_point(aes(color = sig_status), alpha = 0.7, size = 2)+
+  geom_point(data = label_df %>% filter(!sig_status == "Not Significant"),
+             aes(fill = sig_status),
+             shape = 21, 
+             color = "black",
+             alpha = 1,
+             size = 2.5,
+             stroke = 0.6, 
+             show.legend = FALSE)+
+  
+    scale_fill_manual(
+        values = c(
+            "Not Significant" = "grey80",
+            "Only hbnc vs hboc" = "#377bab", 
+            "Only hbnc vs hbon" = "#7d3d92",
+            "Both Significant" = "#ccb4d7" 
+        )) +
+  scale_color_manual(
+        values = c(
+            "Not Significant" = "grey80",
+            "Only hbnc vs hboc" = "#377bab", 
+            "Only hbnc vs hbon" = "#7d3d92",
+            "Both Significant" = "#ccb4d7" 
+        )) +
+   geom_hline(yintercept = c(-0.5, 0.5), linetype = "dashed", color = "grey40") +
+  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed", color = "grey40") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.7) + 
+  geom_text_repel(data = label_df %>% filter(!sig_status == "Not Significant"),
+                  aes(label = label),
+                  size = 3,
+                  force = 2,
+                  # fontface = "bold",
+                  max.overlaps = 20,
+                  box.padding = 1,  
+                  segment.color = "black",    
+                  segment.size = 0.5
+                  ) 
+dev.off()
+```
+
+```{r, eval=FALSE, include=FALSE}
+region_filter <- region_df[which(as.numeric(rownames(region_df)) %in% mz_names),]
+
+region_filter_long <- region_filter %>% 
+  tibble::rownames_to_column(var = "m/z") %>%
+  pivot_longer(-`m/z`, names_to = "colname", values_to = "intensity") %>%
+  separate(colname, into = c("group", "region"), sep = "@") %>%
+   mutate( Treatment = sub("_.*", "", group))
+
+region_filter_summary <-  region_filter_long %>% 
+  group_by(`m/z`, Treatment, region) %>%
+  summarise(intensity_mean = mean(intensity))
+
+radar_list <- list()
+
+for (mz in mz_names[!names(mz_names) %in% c("GSH", "CySSG", "Cysteine")]) {
+  name <- names(mz_names)[match(mz, mz_names)]
+  temp <- region_filter_summary %>%
+  filter(`m/z` == mz) %>% 
+  pivot_wider(names_from = Treatment, values_from = intensity_mean) 
+  temp <- as.data.frame(temp) 
+  temp <- temp %>% select(-`m/z` ) 
+  temp$region <- factor(temp$region, levels = c("OC", "IC", "Core"))
+
+# png(paste0(fig_path, name, "_radar.png"), width = 1200, height = 1300, res = 350 )
+  p <- ggradar(temp %>% select(region, hbnc, hbnn, hboc, hbon),
+  # Polygons
+  group.line.width = 1, 
+  group.point.size = 3,
+  group.colours = c("#d9cde5", "#5c99c5", "#3c5b8a"),
+  # Background and grid lines
+  background.circle.colour = "white",
+  gridline.mid.colour = "grey",
+  legend.position = "bottom",
+  grid.label.size = 0,
+  fill = T,
+  fill.alpha = 0.3)+
+       ggtitle(paste0(name)) +
+       theme(plot.title = element_text(hjust = 0.5, size = 12, face = "bold"))
+  # print(p)
+  # dev.off()
+  radar_list[[name]] <- p
+}
+
+png(paste0(fig_path,  "all_radar.png"), width = 3000, height = 3000, res = 320 )
+combined_radar <- wrap_plots(radar_list, ncol = 3) +
+  plot_layout(guides = "collect",
+              widths = c(1,1)) &
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 10),        
+    legend.title = element_text(size = 10),       
+    legend.key.size = unit(0.8, "lines")          
+  )
+print(combined_radar)
+dev.off()
+```
+
+#### Circular bar chart
+```{r}
+df_summary <- df_long_all %>%
+  group_by(Region, group, name) %>%
+  summarize(mean_intensity = mean(intensity, na.rm = TRUE), .groups = "drop")
+
+
+region_list <- df_summary %>%
+  group_by(Region) %>%
+  group_split()
+
+
+region_matrices <- lapply(region_list, function(df) {
+  df_wide <- df %>%
+    select(group, name, mean_intensity) %>%
+    pivot_wider(names_from = name, values_from = mean_intensity)
+  
+  mat <- as.matrix(df_wide[,-1])          
+  rownames(mat) <- df_wide$group          
+  mat
+})
+
+
+names(region_matrices) <- sapply(region_list, function(df) unique(df$Region))
+
+
+region_matrices[[1]]
+
+```
+
+
+
+```{r}
+library(circlize)
+
+sectors <- colnames(region_matrices[[1]])
+groups <- rownames(region_matrices[[1]])
+group_colors <- c("hbnc" = "#6A9BCB", 
+                  "hbnn" = "#014f97", 
+                  "hboc" = "#CB5148", 
+                  "hbon" = "#ff8787")
+
+
+png(paste0(fig_path, "circular_plot.png"), width = 3000, height = 3000, res = 350)
+
+circos.clear()
+circos.initialize(sectors, xlim = c(0, length(groups)))
+
+y_max <- 4.5
+track_height <- 0.15
+
+# Outermost track = Region 1
+circos.track(ylim = c(0, y_max), track.height = track_height,
+             panel.fun = function(x, y) {
+               sector_index <- get.cell.meta.data("sector.index")
+               vals <- values1[, sector_index]
+               positions <- seq_len(length(vals)) - 0.5
+               circos.barplot(vals, positions, col = group_colors[rownames(values1)])
+               
+               # Add sector labels
+               circos.text(sum(positions)/length(positions), y_max+2.5, sector_index,
+                           facing = "bending.inside", cex = 0.8)
+               
+               # Label the track/layer on the left
+               if(sector_index == sectors[1]) {
+                 circos.text(x = -0.5, y = y_max/2, labels = "Whole lens", facing = "inside", cex = 0.8)
+               }
+             })
+
+# Second track = Region 2
+circos.track(ylim = c(0, y_max), track.height = track_height,
+             panel.fun = function(x, y) {
+               sector_index <- get.cell.meta.data("sector.index")
+               vals <- values2[, sector_index]
+               positions <- seq_len(length(vals)) - 0.5
+               circos.barplot(vals, positions, col = group_colors[rownames(values2)])
+               
+               if(sector_index == sectors[1]) {
+                 circos.text(x = -0.5, y = y_max/2, labels = "OC", facing = "inside", cex = 0.8)
+               }
+             })
+
+# Third track = Region 3
+circos.track(ylim = c(0, y_max), track.height = track_height,
+             panel.fun = function(x, y) {
+               sector_index <- get.cell.meta.data("sector.index")
+               vals <- values3[, sector_index]
+               positions <- seq_len(length(vals)) - 0.5
+               circos.barplot(vals, positions, col = group_colors[rownames(values3)])
+               
+               if(sector_index == sectors[1]) {
+                 circos.text(x = -0.5, y = y_max/2, labels = "IC", facing = "inside", cex = 0.8)
+               }
+             })
+
+# Fourth track = Region 4
+circos.track(ylim = c(0, y_max), track.height = track_height,
+             panel.fun = function(x, y) {
+               sector_index <- get.cell.meta.data("sector.index")
+               vals <- values4[, sector_index]
+               positions <- seq_len(length(vals)) - 0.5
+               circos.barplot(vals, positions, col = group_colors[rownames(values4)])
+               
+               if(sector_index == sectors[1]) {
+                 circos.text(x = -0.5, y = y_max/2, labels = "Core", facing = "inside", cex = 0.8)
+               }
+             })
+
+dev.off()
+```
+
+
+
+### 3.3.3 UMAP 
+```{r, message=FALSE, warning=FALSE}
+set.seed(2026)
+umap_sub <- uwot::umap(hexbin_average_flt[, order(colSums(hexbin_average_flt), decreasing = TRUE)[1:100], drop = FALSE], 
+                       n_neighbors = 100,
+                       min_dist = 0.5)
+
+umap_res <- data.frame(index = rownames(umap_sub),
+                       UMAP_1 = umap_sub[,1],
+                       UMAP_2 = umap_sub[,2],
+                       Treatment = str_extract(rownames(umap_sub), "^[^@]+"),
+                       bin = as.numeric(sub(".*@", "", rownames(umap_sub))),
+                       run =  sub("@.*", "", rownames(umap_sub)))
+
+
+p_all <- ggplot(umap_res, aes(UMAP_1, UMAP_2, color = run))+
+  geom_point(alpha = 0.15, size = 2.5)+
+  scale_color_manual(values = c(
+    "hboc" = "#ffc9c9",  
+    "hbnn" = "#4f86bc",  
+    "hbon" = "#ff8787",
+    "hbnc" = "#b8d0e7"
+  ), 
+  labels = c(
+      "hboc" = "HBOc",
+      "hbnn" = "HBNn",
+      "hbon" = "HBOn",
+      "hbnc" = "HBNc"
+    ) )+
+  tidydr::theme_dr()+
+  theme(legend.title = element_blank(),
+        legend.position = "inside", 
+        legend.position.inside  = c(0.88, 0.87),
+        panel.grid = element_blank())+
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 3))) +
+  coord_equal()
+
+png(paste0(fig_path, "umap_all_treatment.png"), width = 2100, height = 2000, res = 450)
+print(p_all)
+dev.off()
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+umap_res <- umap_res %>%
+  left_join(
+    umap.res.ref %>%
+      mutate(bin = as.numeric(bin)) %>%
+      select(reference = UMAP_2, bin) %>% unique(),
+    by = "bin"
+  ) 
+
+umap_res$reference <- cut(umap_res$reference, breaks = 8)
+
+umap_summary <- umap_res %>% 
+  group_by(Treatment, reference) %>%
+  dplyr::summarise(x = mean(UMAP_1), y = mean(UMAP_2))
+
+library(grid)
+
+png(paste0(fig_path, "umap_all_treatment_arrow.png"), width = 2100, height = 2000, res = 450)
+
+ggplot() +
+  geom_point(
+    data = umap_res, 
+    aes(UMAP_1, UMAP_2, color = run),
+    alpha = 0.2, size = 2
+  ) +
+  geom_path(
+    data = umap_summary %>%
+      filter(!is.na(reference)) %>%      
+      group_by(Treatment) %>%
+      arrange(desc(reference)),          
+    aes(x = x, y = y, group = Treatment),
+    color = "grey50",
+    arrow = arrow(length = unit(0.2, "cm"), type = "closed"),
+    size = 0.8,
+    alpha = 1,
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = c(
+    "hboc" = "#ffc9c9",  
+    "hbnd" = "#014f97",  
+    "hbnn" = "#4f86bc",  
+    "hbon" = "#ff8787",
+    "hbod" = "#fa5252",
+    "hbnc" = "#b8d0e7"
+  ), 
+  labels = c(
+      "hboc" = "HBOc",
+      "hbnn" = "HBNn",
+      "hbon" = "HBOn",
+      "hbnc" = "HBNc"
+    ) ) +
+  tidydr::theme_dr() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "inside", 
+    legend.position.inside  = c(0.88, 0.87),
+    panel.grid = element_blank()
+  ) +
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 2.5))) +
+  coord_equal()
+
+dev.off()
+
+```
+
+### 3.3.4 FC Heatmap
+```{r, eval=FALSE, include=TRUE}
+hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+hexbin_info <- read.csv(paste0(dataset_path, "hexbin_info.csv"))  
+
+standard_lens <- hexbin_info %>% 
+  filter(run == "hbnc_a_trim") %>%
+  dplyr::select(run, bin, r.final, z.final)
+
+umap_baseline <- read.csv(paste0(dataset_path, "umap_baseline.csv"))
+
+hexbin_info <- hexbin_info %>% 
+  left_join(umap_baseline %>% 
+              filter(cluster %in% c(3,4,5), 
+                     treatment == "hbnc") %>%
+              dplyr::select(bin, cluster), by = c("bin"))
+
+set.seed(2)
+hexbin_sampled <- hexbin_info %>%
+  filter(!is.na(cluster), run == "hbnc_a_trim") %>%      
+  group_by(cluster) %>%             
+  slice_sample(n = 1) %>%  
+  ungroup()
+```
+
+```{r, eval=FALSE, include=TRUE}
+# outline<- standardize_coordinates(lens_m)
+outline<- standardize_coordinates(lens_m)
+outline<- as.data.frame(outline$X)
+colnames(outline) <- c("y", "x")
+outline <- outline %>%
+    relocate(x, .before = y)
+boundary <- as.matrix(outline)
+```
+
+```{r, eval=FALSE, include=TRUE}
+# # hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+comparisons <- list(c("hbnc", "hbnn"),
+                    c("hbnc", "hboc"),
+                    c("hbnc", "hbon"),
+                    c("hbnn", "hboc"),
+                    c("hbnn", "hbon"),
+                    c("hboc", "hbon") )
+# mz <- 306.0773
+# HexBin_index <- hexbin_sampled$bin 
+# 
+# Plot_FC_HeatMap(hexbin_average_df = hexbin_average_df,
+#                 comparisons = comparisons,
+#                 mz = mz,
+#                 HexBin_index = HexBin_index)
+# 
+# library(patchwork)
+# 
+# plots <- lapply(seq_len(nrow(hexbin_sampled)), function(i) {
+#   b <- hexbin_sampled$bin[i]
+#   cl <- hexbin_sampled$cluster[i]
+#   
+#   p <- Plot_FC_HeatMap(
+#     hexbin_average_df = hexbin_average_df,
+#     comparisons = comparisons,
+#     mz = mz,
+#     HexBin_index = b
+#   ) +
+#     ggtitle(paste0("Cluster ", cl, " - Bin ", b))
+#   
+#   return(p)
+# })
+# 
+# 
+# plots_by_cluster <- split(plots, hexbin_sampled$cluster)
+# 
+# combined_plot <- wrap_plots(
+#   lapply(plots_by_cluster, function(p) wrap_plots(p, nrow = 1)),
+#   ncol = 1
+# ) +
+#   plot_layout(guides = "collect") &             
+#    theme(legend.position = "bottom",
+#          legend.key.width = unit(1.5, "cm"),
+#     legend.key.height = unit(0.6, "cm"))  
+# 
+# png(paste0(fig_path, "combined_plot_FC_GSH.png"), width = 3000, height = 3200, res = 350)
+# combined_plot
+# dev.off()
+```
+
+```{r, eval=FALSE, include=TRUE}
+mz_values <- c(306.0773, 425.0815, 120.0127)
+clusters <- sort(unique(hexbin_sampled$cluster))
+plot_list <- list()
+
+for (i in seq_along(mz_values)) {
+  mz <- mz_values[i]
+  
+  for (cl in clusters) {
+    
+    bins_in_cluster <- hexbin_sampled$bin[hexbin_sampled$cluster == cl]
+    
+    b <- bins_in_cluster[1]
+    
+    p <- Plot_FC_HeatMap(
+      hexbin_average_df = hexbin_average_df,
+      comparisons        = comparisons,
+      mz                 = mz,
+      HexBin_index       = b
+    ) +
+      labs(title = paste0("m/z = ", mz, " | Cluster ", cl)) +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            plot.title = element_text(size = 8,
+                                      hjust = 0.5))
+    
+    plot_list[[length(plot_list) + 1]] <- p
+  }
+}
+
+combined_plot <- wrap_plots(plotlist = plot_list, ncol = 3) +
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.key.width = unit(1.5, "cm"),
+    legend.key.height = unit(0.6, "cm")
+  )
+
+png(paste0(fig_path, "FC_combined_plot.png"), width = 2300, height = 2200, res = 350)
+combined_plot
+dev.off()
+```
+
+```{r, eval=FALSE, include=TRUE}
+# hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+comparisons <- list(c("hbnc", "hbnn"), 
+                    c("hbnc", "hboc"),  
+                    c("hbnc", "hbon"), 
+                    c("hbnn", "hboc"), 
+                    c("hbnn", "hbon"), 
+                    c("hboc", "hbon") )
+mz <- 425.0815
+# HexBin_index <- 916
+
+Plot_FC_HeatMap(hexbin_average_df = hexbin_average_df,
+                comparisons = comparisons,
+                mz = mz,
+                HexBin_index = HexBin_index)
+
+library(patchwork)
+
+plots <- lapply(seq_len(nrow(hexbin_sampled)), function(i) {
+  b <- hexbin_sampled$bin[i]
+  cl <- hexbin_sampled$cluster[i]
+  
+  p <- Plot_FC_HeatMap(
+    hexbin_average_df = hexbin_average_df,
+    comparisons = comparisons,
+    mz = mz,
+    HexBin_index = b
+  ) +
+    ggtitle(paste0("Cluster ", cl, " - Bin ", b))
+  
+  return(p)
+})
+
+
+plots_by_cluster <- split(plots, hexbin_sampled$cluster)
+
+combined_plot <- wrap_plots(
+  lapply(plots_by_cluster, function(p) wrap_plots(p, nrow = 1)),
+  ncol = 1
+) +
+  plot_layout(guides = "collect") &             
+   theme(legend.position = "bottom",
+         legend.key.width = unit(1.5, "cm"),
+    legend.key.height = unit(0.6, "cm"))  
+
+png(paste0(fig_path, "combined_plot_FC_CySSG.png"), width = 3000, height = 3200, res = 350)
+combined_plot
+dev.off()
+```
+
+```{r, eval=FALSE, include=TRUE}
+# hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+comparisons <- list(c("hbnc", "hbnn"), 
+                    c("hbnc", "hboc"),  
+                    c("hbnc", "hbon"), 
+                    c("hbnn", "hboc"), 
+                    c("hbnn", "hbon"), 
+                    c("hboc", "hbon") )
+mz <- 248.0713
+# HexBin_index <- 916
+
+
+library(patchwork)
+
+plots <- lapply(seq_len(nrow(hexbin_sampled)), function(i) {
+  b <- hexbin_sampled$bin[i]
+  cl <- hexbin_sampled$cluster[i]
+  
+  p <- Plot_FC_HeatMap(
+    hexbin_average_df = hexbin_average_df,
+    comparisons = comparisons,
+    mz = mz,
+    HexBin_index = b
+  ) +
+    ggtitle(paste0("Cluster ", cl, " - Bin ", b))
+  
+  return(p)
+})
+
+
+plots_by_cluster <- split(plots, hexbin_sampled$cluster)
+
+combined_plot <- wrap_plots(
+  lapply(plots_by_cluster, function(p) wrap_plots(p, nrow = 1)),
+  ncol = 1
+) +
+  plot_layout(guides = "collect") &             
+   theme(legend.position = "bottom",
+         legend.key.width = unit(1.5, "cm"),
+    legend.key.height = unit(0.6, "cm"))  
+
+png(paste0(fig_path, "combined_plot_FC_Cysteinyl glycine.png"), width = 3000, height = 3200, res = 350)
+combined_plot
+dev.off()
+```
+
+```{r, eval=FALSE, include=TRUE}
+df_plot <- comparisons_df %>% filter(comparison == "hbnc vs hboc")
+
+highlight_bins <- hexbin_sampled$bin
+df_plot$highlight <- df_plot$bin %in% highlight_bins 
+
+df_labels <- df_plot %>%
+  filter(highlight) %>%
+  group_by(bin) %>%
+  slice_head(n =1) %>%   
+  ungroup() %>%
+  mutate(label_text = as.character(bin))
+
+
+
+png(paste0(fig_path, "sample_hexbin_fc_lens_proj.png"), width = 1200, height = 1800, res = 320)
+ggplot() +
+  geom_voronoi(data = hexbin_info %>% filter(run == "hbnc_a_trim"), 
+               aes(z.final, r.final, fill = as.factor(cluster)), 
+               outline =  outline, 
+               alpha = 0.6) +
+  scale_fill_manual(values = c(
+    "3" = "#b8d0e7",
+    "4" = "#4f86bc",
+    "5" = "#014f97"
+  ))+
+  ggnewscale::new_scale_fill()+
+  geom_voronoi_tile(data = df_plot, 
+                    aes(x = z.final, 
+                        y = r.final, 
+                        group = -1L, 
+                        fill = highlight), 
+                    bound = boundary) +
+  scale_fill_manual(
+    values = c("TRUE" = "#ff7300",   
+               "FALSE" = "transparent"), 
+        guide = "none"  
+  ) +
+  # geom_text(
+  #   data = df_labels,
+  #   aes(x = z.final, y = r.final, label = bin),
+  #   color = "grey30",
+  #   size = 4
+  # ) +
+  coord_equal()+
+  theme_article()+
+  theme(
+    legend.position = "none",
+    axis.title = element_blank(),  
+    axis.text  = element_blank(),  
+    axis.ticks = element_blank(),
+    )
+dev.off()
+
+```
+
+
+```{r, eval=FALSE, include=F}
+info <- as.data.frame(str_split_fixed(colnames(hexbin_average_df), "@", 2))
+colnames(info) <- c("treatment", "bin")
+hexbin_average_flt <- hexbin_average_df[, which(info$treatment %in% c("hbnc", "hboc"))]
+
+hbn_mean_raw <- hexbin_average_flt %>% select(matches("^hbnc"))
+hbo_mean_raw <- hexbin_average_flt %>% select(matches("^hboc"))
+
+hbn_mean_info <- as.data.frame(str_split_fixed(colnames(hbn_mean_raw), "@", 2))
+colnames(hbn_mean_info) <- c("run", "bin")
+hbo_mean_info <- as.data.frame(str_split_fixed(colnames(hbo_mean_raw), "@", 2))
+colnames(hbo_mean_info) <- c("run", "bin")
+
+fc_bin_raw <- data.frame(mz = rownames(hbn_mean_raw))
+
+for (bin_idx in unique(hbo_mean_info$bin)) {
+  idx1 <- which(hbo_mean_info$bin == bin_idx)
+  idx2 <- which(hbn_mean_info$bin == bin_idx)
+  
+  
+  # If both idx1 and idx2 exist, calculate fc_bin
+  if (length(idx1) > 0 && length(idx2) > 0) {
+    
+    fc_bin_raw[, paste0(bin_idx)] <- hbo_mean_raw[, idx1] / hbn_mean_raw[, idx2]
+  }
+}
+
+rownames(fc_bin_raw) <- fc_bin_raw$mz
+fc_bin_raw_df <- fc_bin_raw[,-1]
+fc_bin_raw_mat <- as.matrix(fc_bin_raw_df)
+
+na_idx <- as.data.frame(which(is.na(fc_bin_raw_mat), arr.ind = TRUE))
+
+rownames(fc_bin_raw) <- fc_bin_raw$mz
+fc_bin_df <- fc_bin_raw[,-1]
+fc_bin_mat <- as.matrix(fc_bin_df)
+
+# 
+fc_bin_mat[as.matrix(na_idx)] <- fc_bin_raw_mat[as.matrix(na_idx)]
+
+fc_bin_clean <- as.data.frame(fc_bin_mat)
+rownames(fc_bin_clean) <- rownames(fc_bin_raw)
+
+
+fc_GSH <- as.data.frame(t(fc_bin_clean[which(rownames(fc_bin_clean) == 306.0773),]))
+colnames(fc_GSH) <- c("FC")
+
+
+fc_GSH$bin <- as.numeric(rownames(fc_GSH))
+# fc_GSH <- merge(fc_GSH, umap.res.hbn %>% 
+#                   filter(run == "hbnc_a_trim") %>% 
+#                   select(bin, r.final, z.final, x, y, run),
+#                 by = c("bin"), all.x = T)
+
+
+#write.csv(fc_bin_clean, paste0(dataset_path, "fc_bin_clean_imputation_option_2.csv"))
+
+standard_lens <- standard_lens %>% 
+  left_join(fc_GSH %>% select(bin, hbnc_vs_hboc = FC),
+    by = c( "bin"))
+```
+
+```{r, eval=FALSE, include=F}
+comparisons <- list(c("hbnc", "hbnn"), c("hbnc", "hboc"),  c("hbnc", "hbon"), c("hbnn", "hboc"), c("hbnn", "hbon"), c("hboc", "hbon")
+                  )
+
+comparisons_lt <- list()
+
+for (comparison in 1:length(comparisons) ) {
+  hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+info <- as.data.frame(str_split_fixed(colnames(hexbin_average_df), "@", 2))
+colnames(info) <- c("treatment", "bin")
+
+hexbin_average_flt <- hexbin_average_df[, which(info$treatment %in% comparisons[[comparison]])]
+
+hbn_mean_raw <- hexbin_average_flt %>% select(matches(paste0("^", comparisons[[comparison]][1])))
+hbo_mean_raw <- hexbin_average_flt %>% select(matches(paste0("^", comparisons[[comparison]][2])))
+
+hbn_mean_info <- as.data.frame(str_split_fixed(colnames(hbn_mean_raw), "@", 2))
+colnames(hbn_mean_info) <- c("run", "bin")
+hbo_mean_info <- as.data.frame(str_split_fixed(colnames(hbo_mean_raw), "@", 2))
+colnames(hbo_mean_info) <- c("run", "bin")
+
+fc_bin_raw <- data.frame(mz = rownames(hbn_mean_raw))
+
+for (bin_idx in unique(hbo_mean_info$bin)) {
+  idx1 <- which(hbo_mean_info$bin == bin_idx)
+  idx2 <- which(hbn_mean_info$bin == bin_idx)
+  
+  # If both idx1 and idx2 exist, calculate fc_bin
+  if (length(idx1) > 0 && length(idx2) > 0) {
+    
+    fc_bin_raw[, paste0(bin_idx)] <- hbo_mean_raw[, idx1] / hbn_mean_raw[, idx2]
+  }
+}
+
+rownames(fc_bin_raw) <- fc_bin_raw$mz
+fc_bin_raw_df <- fc_bin_raw[,-1]
+fc_bin_raw_mat <- as.matrix(fc_bin_raw_df)
+
+na_idx <- as.data.frame(which(is.na(fc_bin_raw_mat), arr.ind = TRUE))
+
+rownames(fc_bin_raw) <- fc_bin_raw$mz
+fc_bin_df <- fc_bin_raw[,-1]
+fc_bin_mat <- as.matrix(fc_bin_df)
+
+fc_bin_mat[as.matrix(na_idx)] <- fc_bin_raw_mat[as.matrix(na_idx)]
+
+fc_bin_clean <- as.data.frame(fc_bin_mat)
+rownames(fc_bin_clean) <- rownames(fc_bin_raw)
+
+
+fc_GSH <- as.data.frame(t(fc_bin_clean[which(rownames(fc_bin_clean) == 306.0773),]))
+colnames(fc_GSH) <- c("FC")
+
+
+fc_GSH$bin <- as.numeric(rownames(fc_GSH))
+fc_GSH$comparison <- paste0(comparisons[[comparison]][1], " vs " , comparisons[[comparison]][2] )
+
+standard_lens_hex <- standard_lens %>% 
+  left_join(fc_GSH %>% select(bin, FC, comparison),
+    by = c( "bin"))
+
+comparisons_lt[[comparison]] <- standard_lens_hex
+  
+
+}
+
+comparisons_df <- do.call(rbind, comparisons_lt)
+
+```
+
+```{r, eval=FALSE, include=F}
+bin_916 <- comparisons_df %>%
+  filter(bin == 916)
+
+df_heat <- bin_916  %>%
+  select(comparison, FC)
+
+df_heat <- df_heat %>%
+  separate(comparison, into = c("group1", "group2"), sep = " vs ")
+
+groups <- c("hbnc", "hbnn", "hboc", "hbon")
+
+df_heat <- bin_916 %>%
+  tidyr::separate(comparison, into = c("group1", "group2"), sep = " vs ")
+
+df_sym <- bind_rows(
+  df_heat,
+  df_heat %>% transmute(group1 = group2, group2 = group1, FC = FC)
+)
+
+
+df_diag <- data.frame(
+  group1 = groups,
+  group2 = groups,
+  FC = 1
+)
+
+df_all <- bind_rows(df_sym, df_diag)
+
+df_all <- df_all %>%
+  mutate(group1 = factor(group1, levels = groups),
+         group2 = factor(group2, levels = groups))
+
+png(paste0(fig_path, "sample_hexbin_fc.png"), width = 1200, height = 1250, res = 320)
+ggplot(df_all, aes(x = group1, y = group2, fill = log2(FC))) +
+  geom_tile(color = "white") +
+  scale_fill_distiller(
+    palette = "RdYlBu",
+    type = "div",
+    direction = -1,
+    limits = c(-1.5, 1.5),
+    oob = scales::squish,
+    name = expression(log[2](FC))
+  ) +
+  coord_fixed() +
+  theme_article() +
+  theme(legend.position = "inside", 
+        legend.position.inside  = c(0.88, 0.2),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())+
+  labs(
+    title = "Fold Change Heatmap (bin_916)"
+    )
+dev.off()
+```
+
+# Appendix 
+Regional comparison of HBNc segmentation
+```{r, eval=FALSE, include=FALSE}
+hexbin_df_all <- load_csv(paste0(dataset_path, "hexbin_df_all.csv"))
+hexbin_info <- as.data.frame(str_split_fixed(colnames(hexbin_df_all), "@", 2))
+colnames(hexbin_info) <- c("run", "bin")
+hexbin_info <- hexbin_info %>% 
+  mutate(treatment = sub("_.*", "", run),
+    replicate = sub("^[^_]+_([a-z])_.*", "\\1", run))
+
+hexbin_df_hbn <- hexbin_df_all[, which(hexbin_info$treatment == "hbnc")]
+hexbin_info_hbn <- as.data.frame(str_split_fixed(colnames(hexbin_df_hbn), "@", 2))
+colnames(hexbin_info_hbn) <- c("run", "bin")
+hexbin_info_hbn <- hexbin_info_hbn %>% 
+  mutate(treatment = factor(sub("_.*", "", run)),
+    replicate = sub("^[^_]+_([a-z])_.*", "\\1", run))
+
+umap_res_hbn <- umap_baseline %>% 
+  filter(treatment == "hbnc",
+         cluster %in% c(3,4,5))
+
+hexbin_info_hbn <- hexbin_info_hbn %>% 
+  left_join(umap_res_hbn[, c("treatment", "bin", "cluster")], 
+            by = c("treatment", "bin") ) 
+
+na_idx <- which(is.na(hexbin_info_hbn$cluster))
+hexbin_info_hbn <- hexbin_info_hbn[-na_idx,] 
+hexbin_mt_hbn <- t(hexbin_df_hbn[,-na_idx])
+```
+
+## PLS DA
+```{r, eval=FALSE, include=FALSE}
+oplsda_res <- opls(hexbin_mt_hbn, factor(hexbin_info_hbn$cluster))
+saveRDS(oplsda_res, paste0(dataset_path, "plsda_res.RDS"))
+
+score <- as.data.frame(oplsda_res@scoreMN)
+score$cluster <- factor(hexbin_info_hbn$cluster)
+vip <- data.frame(vip = oplsda_res@vipVn,
+                  mz = colnames(hexbin_mt_hbn))
+
+threshold <- quantile(vip$vip, 0.95)
+vip_top <- vip %>%
+  arrange(desc(vip)) %>% 
+  filter(vip>threshold)
+
+vip_top$mz_round <- round(as.numeric(vip_top$mz), 4)
+
+png(paste0(fig_path, "vip_plot.png"), width = 1800, height = 4000, res =400)
+ggplot(vip_top, aes(x = reorder(as.factor(mz_round), vip), y = vip)) +
+  geom_segment(aes(xend = as.factor(mz_round), y = 0, yend = vip), color = "grey60") +
+  geom_point(size = 3, color = "#0073C2FF") +
+  coord_flip() +
+  theme_article() +
+  labs(x = "m/z", y = "VIP score", 
+       title = "Top 5% m/z based on VIP scores") +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank())
+dev.off()
+
+loading <- as.data.frame(oplsda_res@loadingMN) 
+loading$abs_val <- abs(loading[,1])
+
+top_cutoff <- quantile(loading$abs_val, 0.95)
+top_loading <- loading %>% filter(abs_val >= top_cutoff)
+top_loading$variable <- rownames(top_loading)
+top_loading$variable <- fct_reorder(top_loading$variable, top_loading[,1])
+
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+PLS_1<- ggplot(score, aes(p1, p2, colour = cluster, fill = cluster)) +
+  geom_point(alpha = 0.6) +
+  stat_ellipse(type = "norm",
+               level = 0.9,
+               geom = "polygon",   
+               alpha = 0.4,        
+               colour = NA) +    
+  scale_x_continuous(position = "top") +
+  scale_fill_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_color_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  xlab(paste0("Component 1 (", round(oplsda_res@modelDF[["R2X"]][1]*100, 1), "%)"))+
+  ylab(paste0("Component 2 (", sprintf("%.1f", round(oplsda_res@modelDF[["R2X"]][2]*100, 1)), "%)"))+
+  theme_test(base_size = 18) +
+  theme(legend.title = element_blank(),
+        # legend.position = "none",
+        # legend.position.inside = c(0.9, 0.1), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.margin = margin(0,0,0,0))
+
+legend <- ggpubr::get_legend(PLS_1)
+
+marginal_y<- ggplot(score, aes(x = cluster, y = p2)) +
+  geom_half_violin(
+    aes(fill = cluster),
+    side = "r",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) +
+  geom_boxplot(
+    aes(color = cluster),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_fill_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_y_continuous(position = "right", limits = c(-40, 35)) +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.x =  element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+
+marginal_x<- ggplot(score, aes(x = cluster, y = p1)) +
+  geom_half_violin(
+    aes(fill = cluster),
+    side = "l",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) + ylim(-40, 40)+
+  geom_boxplot(
+    aes(color = cluster),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_fill_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  # scale_y_continuous(position = "right") +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.y =  element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  ) + coord_flip()
+
+
+png(paste0(fig_path, "hexbin_pls.png"), width = 2500, height = 2500, res = 350)
+
+combine_1 <- PLS_1+theme(legend.position = "none") + 
+  marginal_y + 
+  marginal_x+legend +
+  plot_layout(guides = "collect", 
+              widths = c(3,1),
+              heights = c(3,1), 
+              ncol = 2, 
+              nrow=2)
+
+print(combine_1)
+
+dev.off()
+```
+
+
+
+```{r, eval=FALSE, include=FALSE}
+PLS_2<- ggplot(score_bin, aes(p1, p2, colour = cluster, fill = cluster)) +
+  geom_point(alpha = 0.6) +
+  stat_ellipse(type = "norm",
+               level = 0.9,
+               geom = "polygon",   
+               alpha = 0.4,        
+               colour = NA) +    
+  scale_x_continuous(position = "top") +
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  xlab(paste0("Component 1 (", round(pca_res_bin@modelDF[["R2X"]][1]*100, 1), "%)"))+
+  ylab(paste0("Component 2 (", sprintf("%.1f", round(pca_res_bin@modelDF[["R2X"]][2]*100, 1)), "%)"))+
+  theme_test(base_size = 18) +
+  theme(legend.title = element_blank(),
+        # legend.position = "none",
+        # legend.position.inside = c(0.9, 0.1), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.margin = margin(0,0,0,0))
+
+legend <- ggpubr::get_legend(PLS_2)
+
+marginal_y<- ggplot(score_bin, aes(x = cluster, y = p2)) +
+  geom_half_violin(
+    aes(fill = cluster),
+    side = "r",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) +
+  geom_boxplot(
+    aes(color = cluster),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_y_continuous(position = "right", limits = c(-40, 35)) +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.x =  element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+
+marginal_x<- ggplot(score_bin, aes(x = cluster, y = p1)) +
+  geom_half_violin(
+    aes(fill = cluster),
+    side = "l",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) + ylim(-40, 40)+
+  geom_boxplot(
+    aes(color = cluster),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  # scale_y_continuous(position = "right") +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.y =  element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  ) + coord_flip()
+
+
+png(paste0(fig_path, "bin_pls.png"), width = 2500, height = 2500, res = 350)
+
+combine_2 <- PLS_2+theme(legend.position = "none") + 
+  marginal_y + 
+  marginal_x+legend +
+  plot_layout(guides = "collect", 
+              widths = c(3,1),
+              heights = c(3,1), 
+              ncol = 2, 
+              nrow=2)
+
+print(combine_2)
+
+dev.off()
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+pca_1<- ggplot(pca_score, aes(p1, p2, colour = cluster, fill = cluster)) +
+  geom_point(alpha = 0.6) +
+  stat_ellipse(type = "norm",
+               level = 0.9,
+               geom = "polygon",   
+               alpha = 0.4,        
+               colour = NA) +    
+  scale_x_continuous(position = "top",
+                     limits = c(-40, 40)) +
+  ylim(-40, 35)+
+  scale_fill_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_color_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  xlab(paste0("PC1 (", round(pca_res@modelDF[["R2X"]][1]*100, 1), "%)"))+
+  ylab(paste0("PC2 (", sprintf("%.1f", round(pca_res@modelDF[["R2X"]][2]*100, 1)), "%)"))+
+  theme_article()+ 
+  theme_test(base_size = 26) +
+  theme(legend.title = element_blank(),
+        legend.position = "none",
+        # legend.position.inside = c(0.9, 0.1), 
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.margin = margin(0,0,0,0))
+
+legend <- ggpubr::get_legend(pca_1)
+
+marginal_y<- ggplot(pca_score, aes(x = cluster, y = p2)) +
+  geom_half_violin(
+    aes(fill = cluster),
+    side = "r",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) +
+  geom_boxplot(
+    aes(color = cluster),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_fill_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_y_continuous(position = "right", limits = c(-40, 35)) +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.x =  element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+
+marginal_x<- ggplot(pca_score, aes(x = cluster, y = p1)) +
+  geom_half_violin(
+    aes(fill = cluster),
+    side = "l",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) + ylim(-40, 40)+
+  geom_boxplot(
+    aes(color = cluster),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_color_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  scale_fill_manual(values = c("3" = "#5e90b8",
+                               "4"   = "#eeb8c3",
+                               "5"   = "#e77c8e")) +
+  # scale_y_continuous(position = "right") +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.y =  element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  ) + coord_flip()
+
+png(paste0(fig_path, "hexbin_pca.png"), width = 2500, height = 2500, res = 350)
+combine_1 <- pca_1 + marginal_y + marginal_x+legend +plot_layout(guides = "collect", widths = c(3,1),heights = c(3,1), ncol = 2, nrow=2)
+print(combine_1)
+dev.off()
+p + plot_layout(widths = c(5,1.4), heights = c(5,1.4))
+```
+
+```{r, eval=FALSE, include=FALSE}
+bin_info <- as.data.frame(str_split_fixed(colnames(bin_sp_on_tissue), "@", 4))
+colnames(bin_info) <- c("run", "x", "y", "region")
+bin_info <- bin_info %>%
+  mutate(treatment = factor(sub("_.*", "", run)),
+    replicate = sub("^[^_]+_([a-z])_.*", "\\1", run))
+
+bin_mt_hbn <- t(bin_sp_on_tissue[, bin_info$treatment == "hbnc"])
+
+pca_res_bin <- opls(bin_mt_hbn, factor(bin_info$region[which(bin_info$treatment == "hbnc")]))
+saveRDS(pca_res_bin, paste0(dataset_path, "pls_res_bin.RDS"))
+
+pca_res_bin <- opls(bin_mt_hbn)
+saveRDS(pca_res_bin, paste0(dataset_path, "pca_res_bin.RDS"))
+
+pca_bin_score <- as.data.frame(pca_res_bin@scoreMN)
+pca_bin_score$region <- bin_info$region[bin_info$treatment == "hbnc"]
+
+
+pca_2 <-ggplot(pca_bin_score, aes(p1, p2, colour = region, fill = region)) +
+  geom_point(alpha = 0.5) +
+  stat_ellipse(type = "norm",
+               level = 0.95,
+               geom = "polygon",   
+               alpha = 0.4,        
+               colour = NA) +    
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  xlab(paste0("PC1 (", round(pca_res_bin@modelDF[["R2X"]][1]*100, 1), "%)"))+
+  ylab(paste0("PC2 (", sprintf("%.1f", round(pca_res_bin@modelDF[["R2X"]][2]*100, 1)), "%)"))+
+  coord_equal() +
+  theme_article()+ 
+  theme(legend.title = element_blank(),
+        legend.position = "inside",
+        legend.position.inside = c(0.87, 0.1),
+        plot.title = element_text(hjust = 0.5))+
+  ggtitle("PCA on Arbitrary Segmentations")
+```
+
+```{r, eval=FALSE, include=FALSE}
+pca_2<- ggplot(pca_bin_score, aes(p1, p2, colour = region, fill = region)) +
+  geom_point(alpha = 0.4) +
+  stat_ellipse(type = "norm",
+               level = 0.9,
+               geom = "polygon",   
+               alpha = 0.4,        
+               colour = NA) +    
+  scale_x_continuous(position = "top") +
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  xlab(paste0("PC1 (", round(pca_res_bin@modelDF[["R2X"]][1]*100, 1), "%)"))+
+  ylab(paste0("PC2 (", sprintf("%.1f", round(pca_res_bin@modelDF[["R2X"]][2]*100, 1)), "%)"))+
+  theme_article()+ 
+  theme_test(base_size = 26) +
+  theme(legend.title = element_blank(),
+        legend.position = "none",
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        plot.margin = margin(0,0,0,0))
+
+legend_2 <- get_legend(pca_2)
+
+marginal_y_2<- ggplot(pca_bin_score, aes(x = region, y = p2)) +
+  geom_half_violin(
+    aes(fill = region),
+    side = "r",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) +
+  geom_boxplot(
+    aes(color = region),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_y_continuous(position = "right") +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.x =  element_blank(),
+    axis.ticks.x = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  )
+
+
+marginal_x_2<- ggplot(pca_bin_score, aes(x = region, y = p1)) +
+  geom_half_violin(
+    aes(fill = region),
+    side = "l",       
+    width = 0.7,
+    alpha = 0.4,
+    trim = TRUE, 
+    color = NA 
+  ) + ylim(-40, 40)+
+  geom_boxplot(
+    aes(color = region),  
+    position = position_dodge(width = 0.1),
+    fill = "white",       
+    width = 0.15, 
+    alpha = 1,
+    outlier.shape = 21,       
+    outlier.fill = "white",     
+    outlier.color = NULL,       
+    outlier.size = 3  ,
+    linewidth = 1
+  ) +
+  scale_fill_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  scale_color_manual(values = c("Core" = "#5e90b8",
+                               "IC"   = "#eeb8c3",
+                               "OC"   = "#e77c8e")) +
+  # scale_y_continuous(position = "right") +
+  theme_test(base_size = 26) +
+  theme_article()+
+  theme(
+    axis.title = element_blank(),
+    axis.text.y =  element_blank(),
+    axis.ticks.y = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)
+  ) + coord_flip()
+
+png(paste0(fig_path, "pixel_pca.png"), width = 2500, height = 2500, res = 350)
+combine_2<- pca_2 + marginal_y_2 + marginal_x_2 +legend_2 +plot_layout(guides = "collect", widths = c(3,1),heights = c(3,1), ncol = 2, nrow=2)
+print(combine_2)
+dev.off()
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+library(patchwork)
+p_blank <- plot_spacer()
+png(paste0(fig_path, "PCA_comparison.png"), width = 5000, height = 2200, res = 320)
+(combine_2 | p_blank | combine_1) + plot_layout(widths = c(1, 0.05, 1)) 
+dev.off()
+```
+
+PLS-DA
+```{r}
+library(mixOmics)
+res.splsda <- splsda(X = hexbin_mt_hbn,
+                     Y = hexbin_info_hbn$cluster,
+                     ncomp = 2,
+                     scale = TRUE,          
+                     near.zero.var = TRUE)
+
+auc.plsda <- auroc(
+    object = res.splsda,
+    newdata = hexbin_mt_hbn,
+    outcome.test = hexbin_info_hbn$cluster
+)
+
+auc <- as.data.frame(auc.plsda[["graph.Comp2"]][["data"]])
+ggplot(auc, aes(y = Sensitivity, x= Specificity, color = Outcome))+
+  geom_line(linewidth = 1.2) +
+  theme_article()+
+  coord_equal()
+
+
+plsda.var <- data.frame(res.splsda$loadings$X) 
+plsda.ind <- data.frame(res.splsda$variates$X, cluster= hexbin_info_hbn$cluster)
+plsda.eig <- data.frame(res.splsda$prop_expl_var$X)
+plsda1 <- paste(round(plsda.eig[1,]*100,2),"%",sep="")
+plsda2 <- paste(round(plsda.eig[2,]*100,2),"%",sep="")
+
+ggplot(plsda.ind, 
+       aes(comp1, comp2, color = cluster))+
+  geom_point()+
+  stat_ellipse(aes(group = cluster), 
+               # type = "euclid",
+               show.legend = F)
+```
+
+
+```{r}
+bin_mt_hbn, factor(bin_info$region[which(bin_info$treatment == "hbnc")])
+
+
+res.splsda_2 <- splsda(X = bin_mt_hbn,
+                     Y = factor(bin_info$region[which(bin_info$treatment == "hbnc")]),
+                     ncomp = 2,
+                     scale = TRUE,          
+                     near.zero.var = TRUE)
+
+auc.plsda_2 <- auroc(
+    object = res.splsda_2,
+    newdata = bin_mt_hbn,
+    outcome.test = pca_bin_score$region
+)
+
+auc_2 <- as.data.frame(auc.plsda_2[["graph.Comp2"]][["data"]])
+
+ggplot(auc_2, aes(y = Sensitivity, x= Specificity, color = Outcome))+
+  geom_line(linewidth = 1.2) +
+  theme_article()+
+  coord_equal()
+```
+
+## PCA
+```{r}
+pca_res <- opls(hexbin_mt_hbn)
+
+pca_score <- as.data.frame(pca_res@scoreMN)
+pca_score$cluster <- factor(hexbin_info_hbn$cluster)
+
+pca_loading <- as.data.frame(pca_res@loadingMN)
+```
+
+## Alignment comparison 
+
+### Previous Method
+```{r, eval=FALSE, include=FALSE}
+pixel_info <- read.csv(paste0(dataset_path, "pixel_info.csv"))
+
+pixeldf <- pixel_info 
+
+for (imsrun in unique(pixeldf$run)){
+  pixeldf$x[pixeldf$run == imsrun]->x
+  pixeldf$y[pixeldf$run == imsrun]->y
+  x_scale<-(x-(max(x)-min(x))/2)/(max(y)-min(y))
+  y_scale<-(y-(max(y)-min(y))/2)/(max(y)-min(y))
+  pixeldf$x_scale[pixeldf$run == imsrun]<-x_scale 
+  pixeldf$y_scale[pixeldf$run == imsrun]<-y_scale
+}
+
+
+bin <- hexbin(pixeldf$x_scale,pixeldf$y_scale, xbins=round(sqrt(nrow(pixeldf)/6/length(unique(pixeldf$run)))), IDs= TRUE)
+
+pixeldf$bin <- bin@cID
+write.csv(pixeldf,paste0(wd,"pixeldf_old.csv"), row.names = F)
+
+
+ggplot(pixeldf, 
+       aes(x_scale, y_scale))+
+  geom_point()+
+  coord_equal()+
+  theme_article()+
+  facet_wrap(vars(run))
+```
+
+```{r,  eval=FALSE, include=FALSE}
+info <- as.data.frame(str_split_fixed(colnames(bin_sp), "@", 4))
+colnames(info) <- c("run", "x", "y", "region")
+
+identical(as.numeric(info$x), as.numeric(pixeldf$x))
+identical(as.numeric(info$y), as.numeric(pixeldf$y))
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+hexbin_df_old <- HexBin_Signal(data = bin_sp,
+                               pixel_info = pixeldf)
+
+# hexbin_df_old2 <- load_csv(paste0(dataset_path, "hexbin_df_old_method.csv"))
+
+# write.csv(hexbin_df_old, paste0(dataset_path, "hexbin_df_old_method.csv"))
+```
+
+
+```{r, eval=FALSE, include=FALSE}
+col_info <- tibble(
+  colname = colnames(hexbin_df_old),
+  run  = str_extract(colnames(hexbin_df_old), ".*(?=@)"),
+  hexID   = str_extract(colnames(hexbin_df_old), "(?<=@)\\d+") %>% as.numeric()
+)
+
+
+
+df_long <- hexbin_df_old %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer( -mz,
+    names_to = "colname",
+    values_to = "intensity"
+  )  %>%
+  left_join(col_info, by = "colname") %>%
+  filter(mz == "306.0773",
+         run %in% c("hbnc_a_trim",
+                    "hbnc_b_trim",
+                    "hbnc_c_trim"))
+
+
+ggplot(df_long, aes(hexID, intensity, color = run)) +
+  geom_line()+
+  facet_grid(rows = vars(run))+
+  theme_article()
+  
+```
+
+```{r}
+run1 <- "hbnc_a_trim"
+run2 <- "hbnc_c_trim"
+
+df_pair <- df_long %>% 
+  filter(run %in% c(run1, run2))
+```
+
+```{r}
+mz_value <- 306.0773
+
+df_mz <- df_pair %>%
+    filter(mz == mz_value) %>%
+    select(run, hexID, intensity)
+  
+df_wide <- df_mz %>%
+    pivot_wider(names_from = run, 
+                values_from = intensity)
+
+df_wide[is.na(df_wide)] <- 0
+cor(df_wide[[run1]], df_wide[[run2]])
+
+ggplot(df_wide,
+       aes(x = (hbnc_a_trim),
+           y = (hbnc_c_trim))) +
+  geom_point(na.rm = TRUE) +
+  coord_equal() +
+  theme_article()
+
+
+```
+
+## New 
+```{r}
+col_info_new <- tibble(
+  colname = colnames(hexbin_df_all),
+  run  = str_extract(colnames(hexbin_df_all), ".*(?=@)"),
+  hexID   = str_extract(colnames(hexbin_df_all), "(?<=@)\\d+") %>% as.numeric()
+)
+
+
+
+df_long_new <- hexbin_df_all %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer( -mz,
+    names_to = "colname",
+    values_to = "intensity"
+  )  %>%
+  left_join(col_info_new, by = "colname") %>%
+  filter(mz == "306.0773",
+         run %in% c("hbnc_a_trim",
+                    "hbnc_b_trim",
+                    "hbnc_c_trim"))
+
+ggplot(df_long_new, aes(hexID, intensity, color = run)) +
+  geom_line()+
+  facet_grid(rows = vars(run))+
+  theme_article()
+
+df_pair_new <- df_long_new %>% 
+  filter(run %in% c(run1, run2))
+
+
+df_mz_new <- df_pair_new %>%
+    filter(mz == mz_value) %>%
+    select(run, hexID, intensity)
+  
+df_wide_new <- df_mz_new %>%
+    pivot_wider(names_from = run, 
+                values_from = intensity)
+
+df_wide_new[is.na(df_wide_new)] <- 0
+cor(df_wide_new[[run1]], df_wide_new[[run2]])
+```
+
+### No alignment at all
+```{r}
+pixeldf_raw <- pixel_info
+
+for (imsrun in unique(pixeldf_raw$run)){
+  pixeldf_raw$x[pixeldf_raw$run == imsrun]->x
+  pixeldf_raw$y[pixeldf_raw$run == imsrun]->y
+  x_scale<-(x-(max(x)-min(x))/2)
+  y_scale<-(y-(max(y)-min(y))/2)
+  pixeldf_raw$x_scale[pixeldf_raw$run == imsrun]<-x_scale 
+  pixeldf_raw$y_scale[pixeldf_raw$run == imsrun]<-y_scale
+}
+
+
+bin <- hexbin(pixeldf_raw$x_scale,pixeldf_raw$y_scale, xbins=round(sqrt(nrow(pixeldf_raw)/6/length(unique(pixeldf_raw$run)))), IDs= TRUE)
+
+pixeldf_raw$bin <- bin@cID
+write.csv(pixeldf_raw,paste0(wd,"pixeldf_raw.csv"), row.names = F)
+
+
+ggplot(pixeldf_raw, 
+       aes(x_scale, y_scale))+
+  geom_point()+
+  coord_equal()+
+  theme_article()+
+  facet_wrap(vars(run))
+
+hexbin_df_raw <- HexBin_Signal(data = bin_sp,
+                               pixel_info = pixeldf_raw)
+
+write.csv(hexbin_df_raw, paste0(dataset_path, "hexbin_df_no_alignment.csv"))
+```
+
+```{r, eval=FALSE, include=FALSE}
+col_info_raw <- tibble(
+  colname = colnames(hexbin_df_raw),
+  run  = str_extract(colnames(hexbin_df_raw), ".*(?=@)"),
+  hexID   = str_extract(colnames(hexbin_df_raw), "(?<=@)\\d+") %>% as.numeric()
+)
+
+
+df_long_raw <- hexbin_df_raw %>%
+  tibble::rownames_to_column("mz") %>%
+  pivot_longer( -mz,
+    names_to = "colname",
+    values_to = "intensity"
+  )  %>%
+  left_join(col_info_raw, by = "colname") %>%
+  filter(mz == "306.0773",
+         run %in% c("hbnc_a_trim",
+                    "hbnc_b_trim",
+                    "hbnc_c_trim"))
+
+
+ggplot(df_long_raw, aes(hexID, intensity, color = run)) +
+  geom_line()+
+  facet_grid(rows = vars(run))+
+  theme_article()
+  
+```
+
+```{r}
+run1 <- "hbnc_a_trim"
+run2 <- "hbnc_c_trim"
+
+df_pair_raw <- df_long_raw %>% 
+  filter(run %in% c(run1, run2))
+```
+
+```{r}
+mz_value <- 306.0773
+
+df_mz_raw <- df_pair_raw %>%
+    filter(mz == mz_value) %>%
+    select(run, hexID, intensity)
+  
+df_wide_raw <- df_mz_raw %>%
+    pivot_wider(names_from = run, 
+                values_from = intensity)
+
+df_wide_raw[is.na(df_wide_raw)] <- 0
+cor(df_wide_raw[[run1]], df_wide_raw[[run2]])
+
+ggplot(df_wide_raw,
+       aes(x = (hbnc_a_trim),
+           y = (hbnc_c_trim))) +
+  geom_point(na.rm = TRUE) +
+  coord_equal() +
+  theme_article()
+```
+
+
+```{r}
+runs <- c("hbnc_a_trim",
+          "hbnc_b_trim",
+          "hbnc_c_trim")
+
+hexbin_list <- list(
+  all = hexbin_df_all,
+  old = hexbin_df_old,
+  raw = hexbin_df_raw
+)
+
+results <- data.frame(
+  dataset = character(),
+  run1    = character(),
+  run2    = character(),
+  cor     = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (dname in names(hexbin_list)) {
+
+  hexbin_df <- hexbin_list[[dname]]
+
+  for (i in 1:(length(runs) - 1)) {
+    for (j in (i + 1):length(runs)) {
+
+      cor_val <- HexBin_cor(
+        hexbin_df_all = hexbin_df,
+        mz_value = 306.0773,
+        run1 = runs[i],
+        run2 = runs[j]
+      )
+
+      results <- rbind(
+        results,
+        data.frame(
+          dataset = dname,
+          run1    = runs[i],
+          run2    = runs[j],
+          cor     = cor_val
+        )
+      )
+    }
+  }
+}
+
+results
+```
+
+
+```{r}
+results$comparison <- paste(results$run1, results$run2, sep = " vs ")
+
+results$dataset <- dplyr::recode(
+  results$dataset,
+  all = "Baycentric Deformation",
+  old = "Rigid Transformation",
+  raw = "No Transformation"
+)
+
+results$dataset <- factor(
+  results$dataset,
+  levels = c(
+    "No Transformation",
+    "Rigid Transformation",
+    "Baycentric Deformation"
+  )
+)
+
+
+
+ggplot(results, aes(x = dataset, y = cor, color = comparison, group = comparison)) +
+  geom_point(size = 3) +
+  geom_line(linewidth = 1) +
+  labs(
+    x = "Method",
+    y = "Pearson Correlation"
+  ) +
+  scale_color_manual(
+    values = c(
+      "hbnc_a_trim vs hbnc_b_trim" = "#1B9E77",
+      "hbnc_a_trim vs hbnc_c_trim" = "#D95F02",
+      "hbnc_b_trim vs hbnc_c_trim" = "#7570B3"
+    ),
+    labels = c(
+      "hbnc_a_trim vs hbnc_b_trim" = "Rep 1 vs Rep 2",
+      "hbnc_a_trim vs hbnc_c_trim" = "Rep 1 vs Rep 3",
+      "hbnc_b_trim vs hbnc_c_trim" = "Rep 2 vs Rep 3"
+    )
+  ) +
+  theme_article() +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.84, 0.1),
+    legend.background = element_rect(
+      fill = alpha("white", 0.7),
+      colour = NA
+    )
+  )
+```
+
+```{r}
+row_sums <- rowSums(hexbin_df_all, na.rm = TRUE)
+top10_mz <- names(sort(row_sums, decreasing = TRUE))[1:10]
+```
+
+```{r}
+run_sets <- list(
+  hbnc = c("hbnc_a_trim", "hbnc_b_trim", "hbnc_c_trim"),
+  hbnn = c("hbnn_a_trim", "hbnn_b_trim", "hbnn_c_trim"),
+  hboc = c("hboc_a_trim", "hboc_b_trim", "hboc_c_trim"),
+  hbon = c("hbon_a_trim", "hbon_b_trim", "hbon_c_trim")
+)
+
+hexbin_list <- list(
+  all = hexbin_df_all,
+  old = hexbin_df_old,
+  raw = hexbin_df_raw
+)
+
+
+results <- data.frame(
+  dataset = character(),
+  run_set = character(),
+  mz      = character(),
+  run1    = character(),
+  run2    = character(),
+  cor     = numeric(),
+  stringsAsFactors = FALSE
+)
+
+
+for (dname in names(hexbin_list)) {
+  hexbin_df <- hexbin_list[[dname]]
+
+  for (set_name in names(run_sets)) {
+    runs <- run_sets[[set_name]]
+
+     for (mz_val in mz_names) {
+
+           for (i in 1:(length(runs) - 1)) {
+        for (j in (i + 1):length(runs)) {
+
+          cor_val <- HexBin_cor(
+            hexbin_df_all = hexbin_df,
+            mz_value = as.numeric(mz_val),  
+            run1 = runs[i],
+            run2 = runs[j],
+            runs = runs
+          )
+
+          results <- rbind(
+            results,
+            data.frame(
+              dataset = dname,
+              run_set = set_name,
+              mz      = mz_val,
+              run1    = runs[i],
+              run2    = runs[j],
+              cor     = cor_val
+            )
+          )
+        }
+      }
+    }
+  }
+}
+
+results
+
+```
+
+```{r}
+results$comparison <- paste(results$run1, results$run2, sep = " vs ")
+
+
+results$dataset <- dplyr::recode(
+  results$dataset,
+  all = "Baycentric Deformation",
+  old = "Rigid Transformation",
+  raw = "No Transformation"
+)
+
+results$dataset <- factor(
+  results$dataset,
+  levels = c(
+    "No Transformation",
+    "Rigid Transformation",
+    "Baycentric Deformation"
+  )
+)
+
+png(paste0(fig_path, "alignment_cor.png"), width = 2700, height = 1800, res = 400)
+
+ggplot(
+  results %>%
+    filter(mz %in% c(288.1209, 306.0773, 422.0885, 611.1461)),
+  aes(x = dataset, y = cor)
+) +
+  # geom_line(
+  #   aes(group = comparison),
+  #   color = "grey70",
+  #   alpha = 0.7,
+  #   linewidth = 0.6
+  # ) +
+  geom_jitter(
+    aes(group = comparison, fill = dataset),
+    shape = 21,
+    size = 2
+  ) +
+  geom_boxplot(
+    aes(group = dataset, fill = dataset),
+    alpha = 0.6,
+    outlier.shape = NA,
+    width = 0.5
+  ) +
+  labs(
+    x = "Dataset",
+    y = "Pearson Correlation"
+  ) +
+  theme_article(base_size = 14) +
+  facet_grid(cols = vars(mz))+ 
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.length = unit(-0.07, "cm"),
+    legend.position = "bottom"
+  ) +
+  guides(
+    color = guide_legend(title = NULL),
+    fill  = guide_legend(title = NULL)
+  )+ 
+  scale_color_manual(
+    values = c("#377bab", "#ccb4d7", "#7d3d92")
+  ) +
+  scale_fill_manual(
+    values = c("#377bab", "#ccb4d7", "#7d3d92")
+  )
+
+dev.off()
+```
+
