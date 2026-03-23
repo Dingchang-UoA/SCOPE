@@ -1075,17 +1075,6 @@ pixel_info$bin <- bin@cID
 pixel_info$bin <- as.factor(pixel_info$bin)
 
 write.csv(pixel_info, paste0(dataset_path, "pixel_info.csv"), row.names = F)
-
-
-ggplot(pixel_info, aes(z.final, r.final))+
-  geom_point()+
-  facet_wrap(vars(run), ncol = 6)+
-  coord_equal()+
-  theme_article()+
-  theme(axis.title = element_blank(),
-    axis.text  = element_blank(),
-    axis.ticks = element_blank())
-#pixel_info <- read.csv(paste0(dataset_path, "pixel_info.csv"))
 ```
 
 Average the pixel intensities in every HexBin
