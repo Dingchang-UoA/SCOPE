@@ -822,28 +822,24 @@ log_Core <- log_Core %>% as.data.frame() %>%
 ```
 
 Heatmap Parameters
-```{r}
-col_fun <- colorRamp2(c(0,2.5, 5),  c("#2872d1", "white", "#ff0d0d"))
-# col_fun <- colorRamp2(c(-2,0,2), c("#13a075", "white", "#e69f03"))
-# col_fun <- colorRamp2(c(-2,0,2), c("#B3A9EB", "white", "#ffa500"))
+```{r, message=FALSE, warning=FALSE}
 col_fun <- colorRamp2(c(0,1,2,3,5), c("#69AADB", "#cae5f8", "#FAEFF5","#F2C5DA", "#D45590"))
-# col_fun <- colorRamp2(c(-2,0,2), c("#0f86a9", "white", "#FC8452"))
-```
 
+cell_fun <- function(j, i, x, y, w, h, fill) {
+  grid.roundrect(
+    x, y,
+    width  = w * 0.92,
+    height = h * 0.92,
+    r = unit(0.35, "snpc"),
+    gp = gpar(fill = fill, col = NA)
+  )
+}
 
-
-```{r, message= FALSE, warning= FALSE}
 sample_OC <- sub("_.*", "", colnames(log_OC))
 sample_IC <- sub("_.*", "", colnames(log_IC))
 sample_Core <- sub("_.*", "", colnames(log_Core))
 
 group_colors <- c("hbnc" = "#6A9BCB", "hboc" = "#CB5148")
-col_fun <- circlize::colorRamp2(
-  c(min(c(log_OC, log_IC, log_Core), na.rm = TRUE), 
-    median(c(log_OC, log_IC, log_Core), na.rm = TRUE), 
-    max(c(log_OC, log_IC, log_Core), na.rm = TRUE)),
-                      c("#440154", "#21908C", "#FDE725")
-  ) 
 
 col_anno <- HeatmapAnnotation(
   Group = sample_OC,
@@ -916,8 +912,6 @@ ht_Core <- Heatmap(
         labels = c("Min", "Max")
     )
 )
-
-
 
 png(paste0(fig_path,"heatmap_HBNC_HBOC_new.png"), width = 4000, height = 2900, res=500)
 p_heatmap <- draw(ht_OC + ht_IC + ht_Core, heatmap_legend_side = "right")
