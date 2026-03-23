@@ -316,8 +316,8 @@ hbnc_a_bin <- pixel_convolution(umap.res,
 
 Once all runs are finished, the resulting data matrices will be saved as .Rdata files.
 ```{r}
-load(paste0(dataset_path, "hbo_region.RData"))
-load(paste0(dataset_path, "hbn_region.RData"))
+load(paste0(dataset_path, "/hbo_region.RData"))
+load(paste0(dataset_path, "/hbn_region.RData"))
 ```
 
 Arbitrary segmentation data
@@ -334,7 +334,7 @@ colnames(hbo_info) <- c("run", "region")
 mean_sp_df <- cbind(hbn_region_df , hbo_region_df)
 # info <- rbind(hbn_info, hbo_info)
 
-write.csv(mean_sp_df, paste0(dataset_path, "mean_sp_df.csv"), row.names = T)
+write.csv(mean_sp_df, paste0(dataset_path, "/mean_sp_df.csv"), row.names = T)
 ```
 
 Remove the off-tissue areas from convoluted pixel (150 µm) data.
@@ -920,6 +920,10 @@ dev.off()
 
 
 ## 3.2 Layer 3 analysis
+```{r}
+bin_sp <- load_csv(paste0(dataset_path, "/raw_data_convoluted.csv"))
+bin_info <- read.csv(paste0(dataset_path, "/bin_info.csv"))
+```
 
 ### 3.2.1 Co-registration
 Lens shape model
@@ -943,7 +947,6 @@ fig_model <- ggplot(lens_m, aes(z,r))+
 ```
 
 ```{r, message=FALSE, warning=FALSE}
-bin_info <- read.csv(paste0(dataset_path, "/bin_info.csv"))
 coordata <- bin_info[,c("x", "y", "run", "on_tissue")]
 coordata <- find_edge_m(coordata)
 
@@ -976,17 +979,9 @@ coordata$r.final <- lens_e_t_df$r.final
 coordata$z.final <- lens_e_t_df$z.final
 ```
 
-
 ```{r, message=FALSE, warning=FALSE}
 # Plot the moving displacement
 plot_e2m_displacement(transform_df)
-# +
-#   theme_void()+
-#   theme(legend.title = element_blank(),
-#         strip.text = element_blank()) -> fig_movement
-# 
-# print(fig_movement)
-
 
 transform_ex <- transform_df %>% 
   filter(run == "hbnc_a_trim")
@@ -1013,19 +1008,24 @@ dev.off()
 
 ```{r}
 GSH_DF <- intensity(data = bin_sp,
-          mz = 306.0773,
-          tol = 15, 
-          unit = "ppm") %>% 
-  filter(run == "hbnc_a_trim") %>%
-  cbind(coordata %>% filter(run == "hbnc_a_trim")  %>% 
-          select(-run))  %>%
-  mutate(
-    intensity_rank = case_when(
-      intensity == 0            ~ 0,
-      intensity > 0             ~ percent_rank(intensity[intensity > 0])
+                    mz = 306.0773,
+                    tol = 15, 
+                    unit = "ppm") %>% 
+    filter(run == "hbnc_a_trim") %>%
+    cbind(coordata %>% 
+              filter(run == "hbnc_a_trim") %>% 
+              select(-run)) %>%
+    mutate(
+        intensity_rank = if_else(
+            intensity == 0,
+            0,
+            percent_rank(intensity)
+        )
     )
-  )
-   
+
+lens_palette <- colorRampPalette(
+  c("#4393c3ff", "#92c5deff", "#c2dfed", "#fddf91", "#f2764d", "#e04532", "#ff0014")
+)(100)
 
 fig_raw <- ggplot(GSH_DF, 
        aes(x,y, fill = intensity_rank)) +
@@ -1055,20 +1055,12 @@ fig_deform <- ggplot(GSH_DF,
         limits  = c(0, 1),
         )
 
-
-png(paste0(fig_path, "Deformation.png"), width = 4500, height = 2400, res = 350)
+# 
+# png(paste0(fig_path, "Deformation.png"), width = 4500, height = 2400, res = 350)
+library(patchwork)
 combined_fig <- fig_raw + fig_deform + plot_layout(ncol = 2)
 combined_fig
-dev.off()
-```
-
-```{r, include=FALSE, eval=FALSE}
-library(patchwork)
-png(paste0(fig_path, "Deformation.png"), width = 4500, height = 2400, res = 350)
-(fig_model | fig_edge | fig_movement) +   
-  plot_layout(ncol = 3, widths = c(1, 1, 1), guides = "collect") &
-  theme(plot.margin = margin(10, 10, 10, 10))  
-dev.off()
+# dev.off()
 ```
 
 
