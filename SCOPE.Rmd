@@ -1141,7 +1141,7 @@ write.csv(hexbin_average_df, paste0(dataset_path, "hexbin_average_df.csv"), row.
 
 ### 3.2.3 Dimensionality reduction
 ```{r, message=FALSE, warning=FALSE}
-hexbin_average_df <- load_csv(paste0(dataset_path, "hexbin_average_df.csv"))
+hexbin_average_df <- load_csv(paste0(dataset_path, "/hexbin_average_df.csv"))
 
 info <- as.data.frame(str_split_fixed(colnames(hexbin_average_df), "@", 2))
 colnames(info) <- c("treatment", "bin")
@@ -1402,32 +1402,14 @@ dev.off()
 
 
 ```{r}
-mz_names <- c("OPH" = 288.1209,
-              "GSH" = 306.0773,
-              "SDGSH" = 422.0885,
-              "Glutamic\nacid" = 146.0466,
-              "CySSG" = 425.0815,
-              "GSSG" = 611.1461,
-              "Oxoproline" = 128.0360,
-              "Cysteinyl\nglycine" = 177.0367,
-              "GGC" = 249.0582,
-              "GSSH" = 338.0491,
-              "SHGSH" = 336.0854,
-              "Cysteine" = 120.0127)
-
 HexBin_FC_target <- HexBin_FC[which(rownames(HexBin_FC) %in% mz_names),]
 
 data <- t(HexBin_FC_target)
 colnames(data) <- names(mz_names)[match(colnames(data), mz_names)]
 data <- log2(data)
 
-
-
-
-#OC 
 umap.res.ref_OC <- umap.res.ref %>% filter(cluster_label == "OC")
 data_OC <- data[which(rownames(data) %in% umap.res.ref_OC$bin ), ]
-
 
 p_OC <- ggpairs(
   data_OC,
@@ -1440,128 +1422,9 @@ p_OC <- ggpairs(
     panel.spacing = unit(0.9, "lines")   
   )
 
-
 png(paste0(fig_path, "cor_OC.png"), width = 5500, height = 5550, res = 320)
 p_OC
 dev.off()
-
-
-#IC 
-umap.res.ref_OC <- umap.res.ref %>% filter(cluster_label == "IC")
-data_OC <- data[which(rownames(data) %in% umap.res.ref_OC$bin ), ]
-
-
-p_IC <- ggpairs(
-  data_OC,
-  upper = list(continuous = my_upper),
-  lower = list(continuous = my_lower),
-  diag  = list(continuous = my_diag_text)
-) +
-  theme(
-    strip.text = element_blank(),        
-    panel.spacing = unit(0.9, "lines")   
-  )
-
-
-png(paste0(fig_path, "cor_IC.png"), width = 5500, height = 5550, res = 320)
-p_IC
-dev.off()
-
-
-
-#Core
-umap.res.ref_OC <- umap.res.ref %>% filter(cluster_label == "Core")
-data_OC <- data[which(rownames(data) %in% umap.res.ref_OC$bin ), ]
-
-
-p_Core <- ggpairs(
-  data_OC,
-  upper = list(continuous = my_upper),
-  lower = list(continuous = my_lower),
-  diag  = list(continuous = my_diag_text)
-) +
-  theme(
-    strip.text = element_blank(),        
-    panel.spacing = unit(0.9, "lines")   
-  )
-
-
-png(paste0(fig_path, "cor_Core.png"), width = 5500, height = 5550, res = 320)
-p_Core
-dev.off()
-
-```
-
-```{r}
-my_upper <- function(data, mapping, ...) {
-  x <- eval_data_col(data, mapping$x)
-  y <- eval_data_col(data, mapping$y)
-
-  # Pearson correlation
-  r <- cor(x, y, method = "pearson", use = "pairwise.complete.obs")
-
-  ggplot() +
-    geom_tile(aes(0, 0, fill = r)) +
-    geom_text(aes(0, 0, label = sprintf("%.2f", r)), size = 9) +
-    scale_fill_gradientn(
-      name = "Pearson\ncorrelation",
-      colours = c(
-        "#0073a8", "#66b3e6", "#99d2e7", "white", "#ffb3b3", "#ff6666", "#cc3333"
-      ),
-      values = scales::rescale(c(-1, -0.5, -0.1, 0, 0.1, 0.5, 1)),
-      limits = c(-1, 1)
-    ) +
-    scale_x_continuous(expand = c(0, 0)) +
-    scale_y_continuous(expand = c(0, 0)) +
-    theme_test()
-}
-
-
-my_lower <- function(data, mapping, ...) {
-  ggplot(data = data, mapping = mapping) +
-    stat_density_2d(
-      aes(fill = after_stat(level)),
-      geom = "polygon",
-      contour = TRUE
-    ) +
-    scale_fill_gradientn(
-      colours = c(
-        "#FFFFFF", "#17BECF", "#1F77B4", "#2CA02C",
-        "#FFFF00", "#FF7F0E", "#D62728", "#8B0000"
-      )
-    ) +
-    theme_test() +
-     theme(
-      axis.text.x = element_text(
-        angle = 45,
-        hjust = 1,
-        vjust = 1,
-        size  = 13,
-        color = "black"
-      ),
-      axis.text.y = element_text(
-        size  = 13,
-        color = "black"
-      )
-    )
-}
-
-
-
-my_diag_text <- function(data, mapping, ...) {
-  var_name <- as_label(mapping$x)
-
-  ggplot() +
-    geom_text(
-      aes(0, 0, label = var_name),
-      size = 5,
-      fontface = "bold"
-    ) +
-    scale_x_continuous(expand = c(0, 0)) +
-    scale_y_continuous(expand = c(0, 0)) +
-    theme_void()
-}
-
 ```
 
 
