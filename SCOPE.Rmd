@@ -1823,6 +1823,7 @@ hexbin_sampled <- hexbin_info %>%
 ```
 
 ```{r, eval=FALSE, include=TRUE}
+lens_m <- read.csv(paste0(dataset_path, "/Model_lens.csv"))
 outline<- standardize_coordinates(lens_m)
 outline<- as.data.frame(outline$X)
 colnames(outline) <- c("y", "x")
@@ -1838,7 +1839,6 @@ comparisons <- list(c("hbnc", "hbnn"),
                     c("hbnn", "hboc"),
                     c("hbnn", "hbon"),
                     c("hboc", "hbon") )
-
 ```
 
 ```{r, eval=FALSE, include=TRUE}
