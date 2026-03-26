@@ -91,6 +91,7 @@ combined_imdata_path <- MSI_preprocessing(datafile = datafiles,
 ```
 
 After pre-processing, all imzML files are combined and saved into one object named as "combinedimdata.rds". Load the file for further analysis and visualization. 
+
 ```{r, eval=FALSE, include=T}
 combinedimdata <- readRDS(paste0(dataset_path,"/combinedimdata.rds"))
 ```
