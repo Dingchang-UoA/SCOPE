@@ -1199,8 +1199,8 @@ set.seed(1)
 umap_baseline <- umap_baseline %>%
   mutate(cluster = as.factor(kmeans(select(., UMAP_1, UMAP_2), centers = 6)$cluster))
 
-write.csv(umap_baseline, paste0(dataset_path, "umap_baseline.csv"), row.names = F)
-# 
+# write.csv(umap_baseline, paste0(dataset_path, "umap_baseline.csv"), row.names = F)
+
 png(paste0(fig_path, "umap_baseline_comparison.png"), width = 2000, height = 1800, res = 500)
 ggplot(umap_baseline, aes(UMAP_1,UMAP_2, color = cluster))+
   geom_point(alpha = 0.8)+
