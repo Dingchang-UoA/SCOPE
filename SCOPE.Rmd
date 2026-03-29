@@ -515,6 +515,7 @@ p_combined <- (
 png(paste0(fig_path, "hbnc_a_conv.png"), width = 3000, height = 4500, res = 500)
 p_combined
 dev.off()
+
 # png(paste0(fig_path, "hbnc_arb_seg.png"), width = 1500, height = 1800, res = 600)
 ggplot(umap.res, aes(x_conv, -y_conv, fill = pattern)) +
             coord_equal()+ylab("y_conv")+
